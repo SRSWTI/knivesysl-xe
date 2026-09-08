@@ -41,6 +41,7 @@ PREFILL_XMX="${PREFILL_XMX:-${TQ_XPU_PREFILL_XMX:-auto}}"
 PACKED_PREFILL="${PACKED_PREFILL:-${TQ_XPU_PACKED_PREFILL:-1}}"
 CHUNK="${CHUNK:-64}"
 CHUNK_IDLE="${CHUNK_IDLE:-512}"
+PREFILL_SLICE_MS="${PREFILL_SLICE_MS:-0}"
 # k64mlp is the DEFAULT tier as of 2026-09-05: one FP16 scale per K64 tile on
 # the MLP trio only. Measured +30% prefill (460 -> 597 tok/s at T=512,
 # in-process, paired same-session) while clearing the 0.90 teacher-forced
@@ -99,7 +100,7 @@ if curl -s -m 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
 fi
 
 echo "[serve_xe] card=$CARD port=$PORT slots=$SLOTS ctx=$CTX k64=${K64:-off} paged=$PAGED"
-echo "[serve_xe] prefill_xmx=$PREFILL_XMX packed_prefill=$PACKED_PREFILL chunk=$CHUNK chunk_idle=$CHUNK_IDLE"
+echo "[serve_xe] prefill_xmx=$PREFILL_XMX packed_prefill=$PACKED_PREFILL chunk=$CHUNK chunk_idle=$CHUNK_IDLE prefill_slice_ms=$PREFILL_SLICE_MS"
 echo "[serve_xe] log -> $LOG"
 # ZE_AFFINITY_MASK makes the OTHER B70 invisible to Level Zero, so this process
 # physically cannot touch it and the driver skips peer/P2P evaluation between
@@ -111,6 +112,7 @@ ZE_AFFINITY_MASK="$CARD" TQ_XPU_DEV=0 setsid nohup "$PY" xpu/tools/serve_openai_
     --slots "$SLOTS" --ctx "$CTX" --k64 "$K64" \
     --prefill-xmx "$PREFILL_XMX" "${PREFILL_ARGS[@]}" \
     --chunk "$CHUNK" --chunk-idle "$CHUNK_IDLE" \
+    --prefill-slice-ms "$PREFILL_SLICE_MS" \
     --response-idle-timeout "$RESPONSE_IDLE_TIMEOUT" "${PAGING_ARGS[@]}" \
     > "$LOG" 2>&1 < /dev/null &
 disown || true

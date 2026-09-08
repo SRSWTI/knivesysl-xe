@@ -5,6 +5,143 @@ All Intel GPU work is isolated under `xpu/`. The CUDA engine in
 
 ## Unreleased — Intel Arc Pro B70 bring-up
 
+### Measured native optimization campaign (2026-09-08)
+
+Accepted campaign binary: `build/optimization-20260908-142035/libfinal.so`,
+SHA-256 `508c9cbc8ed72e16d7dafff550d49b3a874de637e2557867fbe7aeab07eb7685`.
+Frozen baseline: `libbaseline.so`, SHA-256
+`46343dbdb682e935bdd512b98aa1e2182978b2f74778ace13a7dabfb24919175`.
+All evidence names in this section are relative to that local campaign directory;
+generated libraries and raw build receipts are not distributed with the source.
+The tracked [portable campaign evidence summary](results/optimization-20260908.json)
+retains samples, library/source identities, correctness gates, HTTP/SSE metrics,
+the rejected RC32 decision, and limitations without requiring that local directory.
+
+Retained changes:
+
+- RC16 projection tiles reuse quantized weights across more activation rows;
+  consumer-specific staging avoids producing activation layouts that the next
+  projection does not consume. Existing quantization tiers remain available.
+- GDN loop invariants are hoisted without reassociating the recurrence arithmetic.
+  Convolution-tail advancement fixes overlapping read/write ownership for short
+  tails. The faster reassociated GDN proposals below were not retained.
+- SiLU/multiply and down-projection quantization are fused, preserving the required
+  hidden output and consumer quantization. `silu-fusion-identity.log` records
+  hidden/output exactness for the exercised W8 and W4 K16/K32/K64 synthetic cases;
+  it is not proof of every shape or input.
+- Argmax can remain queued until its consumer needs the result; batched execution
+  and reset avoid unnecessary queue synchronizations. The existing attention
+  implementation remains unchanged after the measured alternatives below.
+- Optional `--prefill-slice-ms` / launcher `PREFILL_SLICE_MS` adapts busy-prefill
+  budgets from measured wave cost. **Default zero** preserves static scheduling;
+  the original 8-row budget rounding is retained. It is an estimate, not a deadline
+  or GPU preemption mechanism.
+
+RC32 was **rejected and removed**, despite passing the sampled exactness gate
+and improving the W4A4 T512 projection from 918.7 to 783.4 microseconds in the
+same-card control. Whole-model prefill showed no consistent improvement:
+`rc32-prefill.json` measured about 14.417 s at 8192 (two-run mean) and 37.619 s
+at 16384 (single run), versus accepted RC16 14.349 s and 37.431 s.
+The headline results and accepted binary remain RC16; a microbenchmark win was
+not treated as a whole-model win.
+
+#### Native timing boundary and results
+
+`quiet-baseline-prefill.json` and `quiet-final-prefill.json` are the precise,
+uninstrumented `bench_prefill.py` receipts, with matching invocation JSON/logs.
+Both use the same TQF, K64 gate/up/down, automatic XMX, page128, two state slots,
+16384-token context/pool, and 512-token chunks on an isolated B70. The synthetic
+prompt repeats a fixed token template. The timer includes native prefill calls
+and Python/ctypes chunk-array construction, but excludes model initialization,
+reset and prompt construction. It includes no HTTP, tokenization, admission,
+or output streaming. This is a whole-model call-loop timer, not GPU kernel time.
+
+| Prompt tokens | Samples/build | Baseline seconds | Accepted seconds | Baseline → accepted tokens/s | Latency reduction |
+|---:|---:|---:|---:|---:|---:|
+| 512 | 2 | 0.835939 | 0.649505 | 612.5 → 788.3 | 22.3% |
+| 2048 | 2 | 3.542637 | 2.779666 | 578.1 → 736.8 | 21.5% |
+| 8192 | 2 | 17.256871 | 14.349054 | 474.7 → 570.9 | 16.9% |
+| 16384 | **1** | 43.115557 | 37.430914 | 380.0 → 437.7 | 13.2% |
+
+Smaller rows are means of two timings per build; tokens/s is prompt length divided
+by mean seconds. The 16k row is **one measurement per build**, not repeated paired
+evidence or a confidence interval. Earlier instrumented/profile runs are diagnostic
+and are not silently substituted for these quiet timings.
+
+#### Paired HTTP and interference measurements
+
+`baseline-http-pair-current-metadata.json` versus `final-http-pair.json` uses
+the same cold 2048/4096-token pair, 32 output tokens per request, APC off, four
+slots, 16384 context, 32768-token page128 pool, K64 MLP, automatic XMX, packed
+prefill, busy/idle budgets 64/512, and time target zero. Two repetitions reverse
+the request launch order. Means:
+
+| Metric | Baseline | Accepted |
+|---|---:|---:|
+| 2048 request TTFT | 8.376 s | 6.864 s |
+| 4096 request TTFT | 14.198 s | 12.049 s |
+| Complete pair wall time | 15.206 s | 13.055 s |
+| 2048 request reported ITL p50 / p99 | 215.4 / 236.1 ms | 191.0 / 208.8 ms |
+
+TTFT/ITL are server request metadata, not native prefill timings. TTFT measures
+submission-to-first-token within the server lifecycle; pair wall time is client
+elapsed time. The ITL entries average per-request percentiles, not pooled samples.
+The corresponding TTFT reductions are 18.1% and 15.1%, with 14.1% lower pair wall
+time. Later uncontended 4096-request ITL p50 remains about 32.4 ms in both arms.
+
+`safe-static-mixed.json` and `final-target100-mixed.json` separately measure a
+64-prompt/96-output stream receiving a 2048-prompt/16-output competitor after its
+eighth nonempty SSE event. Three matched control/mixed repeats alternate order.
+Pooled client decode text-event gaps during incoming prefill changed from
+**140.3/165.2 ms p50/p99** at target zero to **120.0/136.8 ms** at target 100 ms,
+while incoming mean client TTFT rose from **5.012 to 6.360 s** (about 27%).
+These SSE events are not native token timestamps: buffering and empty token text
+affect event counts. The target does not guarantee 100 ms event latency.
+The separate tile-rounded experiment (`final-target100-tile-mixed.json`) reduced
+p99 to 129.1 ms but raised incoming mean TTFT to 7.560 s; that rounding change
+was not retained. This is why the controller remains opt-in, not a default win.
+
+#### Correctness gates and rejected experiments
+
+- `final-cross-build-exact.json`: finite values and **96/96 greedy plus 96/96
+  teacher-forced tokens**, no sampled logit-bit mismatch, against the frozen
+  baseline on heap/graph/transactions continuations. This proves only the sampled
+  cross-build configuration, not all inputs, all tiers, or scalar/XMX equivalence.
+- `final-native-page256.json`: 21 production-numerics cases passed and scalar/XMX
+  aggregate agreement 90/96. `final-native-flat-fixed.json`: 31 fixed-split flat
+  cases passed and aggregate 91/96. Graph remains 28/32 in both, below a per-prompt
+  90% gate; the retained policy is explicitly aggregate ≥90%. Logical KV exactness
+  is scoped to each report's structural mode; width-two logits expose only the
+  last row through the public ABI. The earlier failed flat invocation is not a
+  passing gate; the named fixed-split report is the qualifying run.
+- `final-http-regression.json`: seven scenarios passed, including short/ragged
+  prompts, packed three-wave APC reuse, exact streaming counts, split stops,
+  structured tools, and disconnect during admission/decode with recovery.
+- Parallel/reassociated GDN was fast but failed the existing full-model numerical
+  gate: `integrated-native-production.json` scored **83/96 (86.46%)** and
+  `gdn-dots-native-production.json` **82/96 (85.42%)**. The synthetic 128-row
+  chunk median fell from 1.033 ms (`gdn-baseline-128.log`) to 0.543 ms
+  (`gdn-parallel-128.log`) or 0.362 ms (`gdn-dots-norm-128.log`), but output/state
+  hashes changed. Passing a small relative-error kernel probe was insufficient.
+  Exact-order vectorization retained those baseline hashes but slowed the chunk
+  to 1.298 ms (`gdn-vector-128.log`), so it was not retained either.
+- Attention experiments passed their direct probes but did not justify promotion.
+  At position 8192/query count 512, clean control XMX was 32.481 ms; four subgroups
+  took 39.888 ms, broadcast 40.476 ms. Cached K took 34.011 ms and increased the
+  packed pair from 59.922 to 69.319 ms despite a small paged-single improvement.
+  Sources: `attention-clean-control-8192-512.log`,
+  `attention-clean-nsg4-8192-512.log`, `attention-clean-broadcast-8192-512.log`,
+  `attention-kcache-8192-512.log`; Q-cache and six-subgroup receipts remain in
+  `attention-cacheq-8192-512.log` and `attention-nsg6-8192-512.log`.
+
+Reproducible native and HTTP commands using shipped tools are in
+[`readme.md`](../readme.md#reproduce-the-campaign-workloads). A fresh baseline
+reference can be created with `compare_native_builds.py --record`; neither CUDA
+nor an archived development-workspace reference is required. Run model-owning
+tools sequentially on a free explicitly selected card. No new vendor head-to-head,
+hardware-ceiling determination, universal-exactness claim, or 75k full-model
+performance claim follows from this campaign.
+
 ### XMX prefill and packed prompt execution (2026-09-07)
 
 - Added native Xe2 XMX attention in `src/kernels_prefill.cpp`: DPAS for both

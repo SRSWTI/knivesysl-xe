@@ -29,6 +29,8 @@ def main():
     ap.add_argument("--warmup", type=int, default=8)
     ap.add_argument("--widths", type=int, nargs="+", default=[1, 2, 4, 8])
     args = ap.parse_args()
+    if args.ctx < 8 or args.ctx % 8 or args.steps < 1 or args.warmup < 0:
+        ap.error("context must be a positive multiple of eight; steps positive; warmup nonnegative")
 
     lib = ctypes.CDLL(os.path.abspath(args.lib))
     lib.qwn_init.argtypes = [ctypes.c_char_p]
@@ -38,32 +40,45 @@ def main():
                                       ctypes.c_int, ctypes.c_int]
     lib.qwn_decode_batch.argtypes = [ctypes.POINTER(ctypes.c_int)] * 3 + [
         ctypes.c_int, ctypes.POINTER(ctypes.c_int)]
+    lib.qwn_reset_state.argtypes = []
+    lib.qwn_reset_state.restype = ctypes.c_int
+    lib.qwn_free.argtypes = []
+    lib.qwn_free.restype = None
     rc = lib.qwn_init(os.path.expanduser(args.tqf).encode())
     if rc != 0:
         print(f"qwn_init rc={rc}", file=sys.stderr)
         return 1
     nslots = lib.qwn_num_slots()
-    widths = [w for w in args.widths if w <= nslots]
-    maxw = max(widths)
+    widths = args.widths
+    if not widths or any(w < 1 or w > nslots for w in widths):
+        lib.qwn_free()
+        ap.error(f"requested widths must be between one and the configured {nslots} slots")
     print(f"slots={nslots} ctx={args.ctx} steps={args.steps} widths={widths}")
 
-    ctx = (args.ctx // 8) * 8
-    IntC = ctypes.c_int * ctx
-    prompt = IntC(*([TOK] * ctx))
-    # each slot gets its own unique-prefix prompt so no state is shared
-    for s in range(maxw):
-        assert lib.qwn_set_slot(s) == 0
-        p = IntC(*([TOK + s] * ctx))
-        rc = lib.qwn_prefill_chunk(p, ctx, 0)
-        if rc != 0:
-            print(f"prefill slot {s} rc={rc}", file=sys.stderr)
-            return 1
+    ctx = args.ctx
 
+    def prepare_slots(width):
+        if lib.qwn_reset_state() != 0:
+            raise RuntimeError("native reset failed")
+        for slot in range(width):
+            if lib.qwn_set_slot(slot) != 0:
+                raise RuntimeError(f"cannot select slot {slot}")
+            pos = 0
+            while pos < ctx:
+                count = min(512, ctx - pos)
+                prompt = (ctypes.c_int * count)(*([TOK + slot] * count))
+                rc = lib.qwn_prefill_chunk(prompt, count, pos)
+                if rc != 0:
+                    raise RuntimeError(f"prefill slot {slot} position {pos} failed: {rc}")
+                pos += count
+
+    prepare_slots(1)
     # single-stream baseline (GEMV path, slot 0)
     assert lib.qwn_set_slot(0) == 0
     pos = ctx
     for _ in range(args.warmup):
-        lib.qwn_decode(TOK, pos); pos += 1
+        assert lib.qwn_decode(TOK, pos) >= 0
+        pos += 1
     lat = []
     for _ in range(args.steps):
         t0 = time.perf_counter_ns()
@@ -78,8 +93,9 @@ def main():
     Arr = lambda n, *v: (ctypes.c_int * n)(*v)
     rows = []
     for w in widths:
+        prepare_slots(w)
         slots = Arr(w, *range(w))
-        poss = [ctx + args.warmup + 1] * w   # all slots past their prefill
+        poss = [ctx] * w
         toks = Arr(w, *([TOK] * w))
         out = Arr(w, *([0] * w))
         pv = Arr(w, *poss)

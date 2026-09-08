@@ -357,6 +357,9 @@ int x_gemv_qmma_add(const tq_qmma_weight_t *w, const float *d_x,
 // Reuse one activation quantization across projections with the same input.
 // The in-order queue preserves the prepared scratch until the next prepare.
 void x_prepare_gemv_act_s8(const float *d_x, int K);
+// Exact SiLU*up plus K32 S8 staging; retains the fp32 hidden vector for debug.
+// Requires positive K divisible by 32. Consumed by the next prepared projection.
+void x_silu_mul_quant(float *d_out, const float *d_gate, const float *d_up, int K);
 // Fused (1+w) RMSNorm + the activation quantization its consumers need. Writes
 // the normalized fp32 vector to d_out AND fills the prepared S8 scratch, so a
 // caller that follows a norm with projections needs no separate prepare.
@@ -393,9 +396,12 @@ void x_quantize_act_chunk_s4(const float *d_x, int K, int T, uint8_t *d_aq4,
                              float *d_as4, int32_t *d_asum4);
 int x_gemm_w4a4(const tq_qmma_weight_t *w, const uint8_t *d_aq4,
                 const float *d_as4, const int32_t *d_asum4, float *d_y, int T);
-int x_gemv_w4a8_prepared(const tq_qmma_weight_t *w, float *d_y);
-int x_gemv_w8a8_prepared(const tq_qmma_weight_t *w, float *d_y);
-int x_gemv_qmma_prepared(const tq_qmma_weight_t *w, const float *d_x, float *d_y);
+int x_gemv_w4a8_prepared(const tq_qmma_weight_t *w, float *d_y,
+                         const float *d_residual = nullptr);
+int x_gemv_w8a8_prepared(const tq_qmma_weight_t *w, float *d_y,
+                         const float *d_residual = nullptr);
+int x_gemv_qmma_prepared(const tq_qmma_weight_t *w, const float *d_x, float *d_y,
+                         const float *d_residual = nullptr);
 // Tensor-parallel weight sharding of an already-repacked W4 weight.
 // mode 0 = column-parallel (output rows, honouring packed groups such as
 // q_proj's [q | gate]); mode 1 = row-parallel (the K dimension). Allocates

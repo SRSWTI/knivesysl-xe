@@ -185,8 +185,9 @@ void ensure_split_scratch(size_t elements) {
 // fp32 -> S8. One scale per K32 (exactly one Xe2 DPAS, so the K32 weight tier
 // keeps its single instruction) and one exact integer sum per K16 half, which
 // is the finest granularity any weight tier applies a zero point at.
-void x_quantize_act_s8(const float *d_x, int K, int8_t *d_q, float *d_scale,
-                       int32_t *d_sum) {
+template<bool Silu>
+static void quantize_act_s8(const float *d_x, const float *d_up, float *d_out,
+                            int K, int8_t *d_q, float *d_scale, int32_t *d_sum) {
     const int blocks = K / 32;
     tq_q().parallel_for(
         sycl::nd_range<1>((size_t)blocks * 32, 32),
@@ -194,7 +195,11 @@ void x_quantize_act_s8(const float *d_x, int K, int8_t *d_q, float *d_scale,
             {
             const int b = (int)it.get_group_linear_id();
             const int t = (int)it.get_local_linear_id();
-            const float v = d_x[b * 32 + t];
+            float v = d_x[b * 32 + t];
+            if constexpr (Silu) {
+                v = (v / (1.0f + sycl::exp(-v))) * d_up[b * 32 + t];
+                d_out[b * 32 + t] = v;
+            }
             const float mx = sycl::reduce_over_group(it.get_group(), sycl::fabs(v),
                                                      sycl::maximum<float>());
             const float s = (mx > 0.0f) ? (mx / 127.0f) : 1.0f;
@@ -210,6 +215,11 @@ void x_quantize_act_s8(const float *d_x, int K, int8_t *d_q, float *d_scale,
             }
             d_q[b * 32 + t] = (int8_t)q;
         });
+}
+
+void x_quantize_act_s8(const float *d_x, int K, int8_t *d_q, float *d_scale,
+                       int32_t *d_sum) {
+    quantize_act_s8<false>(d_x, nullptr, nullptr, K, d_q, d_scale, d_sum);
 }
 
 // Shared asymmetric INT4 group fit: weight ~= scale * (q - z) with q and z
@@ -838,6 +848,12 @@ void x_prepare_gemv_act_s8(const float *d_x, int K) {
     x_quantize_act_s8(d_x, K, g_act_q, g_act_scale, g_act_sum);
 }
 
+void x_silu_mul_quant(float *d_out, const float *d_gate, const float *d_up, int K) {
+    if (!d_out || !d_gate || !d_up || K <= 0 || (K % 32) != 0) return;
+    ensure_act_scratch(K);
+    quantize_act_s8<true>(d_gate, d_up, d_out, K, g_act_q, g_act_scale, g_act_sum);
+}
+
 // Fused (1+w) RMSNorm + S8 activation quantization.
 //
 // The unfused pair cost 16.4 us (norm) + 8.3 us (quant) per call for 20 KB of
@@ -1171,6 +1187,81 @@ int choose_gemm_splits(int rgroups, int tgroups, int ktiles) {
     return s;
 }
 
+// Reuse weights across two independent RC8 token groups. Each
+// output keeps the original serial K order; requests needing split-K stay on
+// their existing kernel.
+template <bool S4>
+static int gemm_rc16(const tq_qmma_weight_t *w, const uint8_t *aq,
+                      const float *as, const int32_t *asum, float *y, int T) {
+    const int M = w->M, kt_count = w->K / (S4 ? 64 : 32);
+    const int tgroups = T / 16;
+    const int tasks = (M / 16) * tgroups;
+    const size_t wgs = ((size_t)tasks + kSubgroupsPerWorkgroup - 1) /
+                       kSubgroupsPerWorkgroup;
+    const uint8_t *codes = w->d_s4;
+    const uint16_t *scales = w->d_s4_scale;
+    const int ksh = S4 ? 0 : (w->s4_k64 ? 1 : 0);
+    tq_q().parallel_for(
+        sycl::nd_range<1>(wgs * kSG * kSubgroupsPerWorkgroup,
+                          kSG * kSubgroupsPerWorkgroup),
+        [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(kSG)]] {
+            const auto sg = it.get_sub_group();
+            const int task = (int)it.get_group_linear_id() * kSubgroupsPerWorkgroup +
+                             (int)sg.get_group_linear_id();
+            if (task >= tasks) return;
+            const int rg = task / tgroups, tg = task - rg * tgroups;
+            const int lane = (int)sg.get_local_linear_id();
+            const int apair = lane >> 3, abyte = (lane & 7) * 4;
+            const uint8_t *bbase = codes + (size_t)rg * kt_count * (S4 ? 512u : 256u);
+            const uint16_t *sbase = scales + (size_t)rg * (kt_count >> ksh) * 16u;
+            float acc[2][8];
+            for (int p = 0; p < 2; ++p)
+                for (int m = 0; m < 8; ++m) acc[p][m] = 0.0f;
+            for (int kt = 0; kt < kt_count; ++kt) {
+                const uint8_t *bb = bbase + (size_t)kt * (S4 ? 512u : 256u);
+                const uintv4 blo = *reinterpret_cast<const uintv4 *>(
+                    bb + (size_t)lane * 16u);
+                uintv8 bfrag4;
+                if constexpr (S4) {
+                    const uintv4 bhi = *reinterpret_cast<const uintv4 *>(
+                        bb + 256u + (size_t)lane * 16u);
+                    for (int i = 0; i < 4; ++i) {
+                        bfrag4[i] = blo[i];
+                        bfrag4[4 + i] = bhi[i];
+                    }
+                }
+                const uint16_t packed = sbase[(size_t)(kt >> ksh) * 16u + lane];
+                int zp = (int)(packed & 0xFu);
+                if (zp >= 8) zp -= 16;
+                const float ws = (float)sycl::bit_cast<sycl::half>(
+                    (uint16_t)(packed & 0xFFF0u));
+                for (int p = 0; p < 2; ++p) {
+                    const size_t arow = (size_t)kt * T + tg * 16 + p * 8;
+                    const uint8_t *ab = aq + arow * 32;
+                    uintv4 afrag;
+                    for (int i = 0; i < 4; ++i)
+                        afrag[i] = *reinterpret_cast<const uint32_t *>(
+                            ab + (size_t)(2 * i + apair) * 32 + abyte);
+                    intv8 d;
+                    for (int m = 0; m < 8; ++m) d[m] = 0;
+                    if constexpr (S4) {
+                        DPAS_S4S4_RC8(d, afrag, bfrag4);
+                    } else {
+                        DPAS_S4S8_RC8(d, afrag, blo);
+                    }
+                    const floatv8 asv = *reinterpret_cast<const floatv8 *>(as + arow);
+                    const intv8 sumv = *reinterpret_cast<const intv8 *>(asum + arow);
+                    for (int m = 0; m < 8; ++m)
+                        acc[p][m] += (float)(d[m] - zp * sumv[m]) * (ws * asv[m]);
+                }
+            }
+            for (int p = 0; p < 2; ++p)
+                for (int m = 0; m < 8; ++m)
+                    y[(size_t)(tg * 16 + p * 8 + m) * M + rg * 16 + lane] = acc[p][m];
+        });
+    return 0;
+}
+
 int x_gemm_w4a8(const tq_qmma_weight_t *w, const int8_t *d_aq, const float *d_as,
                 const int32_t *d_asum, float *d_y, int T,
                 const int *offsets, int segments) {
@@ -1205,6 +1296,12 @@ int x_gemm_w4a8(const tq_qmma_weight_t *w, const int8_t *d_aq, const float *d_as
         partition.end[0] = tgroups;
         partition.split[0] = splits = choose_gemm_splits(rgroups, tgroups, Kt);
     }
+    // Validated offsets partition dense rows [0,T) without gaps. Their only
+    // kernel effect is the K split count, whose maximum is `splits`; when it
+    // is one, pairing RC8 groups across request boundaries is row-independent.
+    if (splits == 1 && T % 16 == 0)
+        return gemm_rc16<false>(w, reinterpret_cast<const uint8_t *>(d_aq),
+                                d_as, d_asum, d_y, T);
     const int rtiles = rgroups * tgroups;
     const int tasks = rtiles * splits;
     const size_t wgs = ((size_t)tasks + kSubgroupsPerWorkgroup - 1) /
@@ -1359,6 +1456,8 @@ int x_gemm_w4a4(const tq_qmma_weight_t *w, const uint8_t *d_aq4,
                 const float *d_as4, const int32_t *d_asum4, float *d_y, int T) {
     if (!w || !w->s4_ready || !w->s4_k64 || !w->d_s4 || !w->d_s4_scale) return -1;
     if (!d_aq4 || !d_as4 || !d_asum4 || !d_y || T <= 0 || (T % 8) != 0) return -2;
+    if (T % 16 == 0)
+        return gemm_rc16<true>(w, d_aq4, d_as4, d_asum4, d_y, T);
     const int M = w->M, K = w->K, Kt64 = K / 64;
     const int rgroups = M / 16, tgroups = T / 8;
     const int tasks = rgroups * tgroups;
@@ -1511,8 +1610,9 @@ static int x_gemv_w4a8_prepared_impl(const tq_qmma_weight_t *w, float *d_y,
     return 0;
 }
 
-int x_gemv_w4a8_prepared(const tq_qmma_weight_t *w, float *d_y) {
-    return x_gemv_w4a8_prepared_impl(w, d_y, nullptr);
+int x_gemv_w4a8_prepared(const tq_qmma_weight_t *w, float *d_y,
+                         const float *d_residual) {
+    return x_gemv_w4a8_prepared_impl(w, d_y, d_residual);
 }
 
 int x_gemv_w4a8(const tq_qmma_weight_t *w, const float *d_x, float *d_y) {
@@ -1555,8 +1655,9 @@ static int x_gemv_w8a8_prepared_impl(const tq_qmma_weight_t *w, float *d_y,
     return 0;
 }
 
-int x_gemv_w8a8_prepared(const tq_qmma_weight_t *w, float *d_y) {
-    return x_gemv_w8a8_prepared_impl(w, d_y, nullptr);
+int x_gemv_w8a8_prepared(const tq_qmma_weight_t *w, float *d_y,
+                         const float *d_residual) {
+    return x_gemv_w8a8_prepared_impl(w, d_y, d_residual);
 }
 
 int x_gemv_w8a8(const tq_qmma_weight_t *w, const float *d_x, float *d_y) {

@@ -1,0 +1,2497 @@
+{
+  "schema": "knivesysl-xe-optimization-v1",
+  "date": "2026-09-08",
+  "hardware": {
+    "device": "Intel Arc Pro B70 (BMG-G31 / Xe2)",
+    "vram_gib": 32,
+    "measurement_policy": "One model/workload per card; paired throughput comparisons use the same card. Quiet prefill comparison ran without another campaign GPU workload."
+  },
+  "compiler": "Intel oneAPI DPC++/C++ 2026.1.1 (2026.1.1.20260724)",
+  "baseline": {
+    "library_sha256": "46343dbdb682e935bdd512b98aa1e2182978b2f74778ace13a7dabfb24919175",
+    "build_command": [
+      "/opt/intel/oneapi/compiler/latest/bin/icpx",
+      "-fsycl",
+      "-O2",
+      "-fPIC",
+      "-std=c++17",
+      "-Ixpu/src",
+      "-shared",
+      "-o",
+      "xpu/build/optimization-20260908-142035/libbaseline.so",
+      "xpu/src/decode.cpp",
+      "xpu/src/tqf_loader.cpp",
+      "xpu/src/kernels_core.cpp",
+      "xpu/src/kernels_seq.cpp",
+      "xpu/src/kernels_dpas.cpp",
+      "xpu/src/kernels_prefill.cpp"
+    ],
+    "source_sha256": {
+      "xpu/src/decode.cpp": "b90d5743ae71ea980dc0d3a58e4e308d70100803004efab4ff514aed0a6f64db",
+      "xpu/src/prefill_xmx.hpp": "e1c3610b02363dd6208f62d7e9f7ee7f4273e51a9fcc8bfcc1280eebe880784c",
+      "xpu/src/tqf_loader.cpp": "099e62783b5ba0dacd8a4cedfeffca39117021b2343373d9805fe16a728e2470",
+      "xpu/src/tq_common.hpp": "e12eb29b59b24e3339f4e32ad16a919e8b4dbb16dfa5521416c0fa5f1ded504d",
+      "xpu/src/kernels_dpas.cpp": "ea4a9e4ae5b8f67cf3627596287acb5bf49af8c6861cf5abd7418397f9713ca3",
+      "xpu/src/kernels_core.cpp": "fe5d54a2d7c8d07b4415cba193b77e82f3fd9de38f5611b1f90fe16a7f8e33f1",
+      "xpu/src/kernels_seq.cpp": "47bed79dbd60fb7fe73ebbb1907deef009ca0b3f68114780649cbfb7137e0a53",
+      "xpu/src/kernels_prefill.cpp": "5cc3acb1bbcf414e4b2d88279e8254a0f6ab423649f4722b6546d8052f505c5a"
+    }
+  },
+  "accepted_measured_library_sha256": "508c9cbc8ed72e16d7dafff550d49b3a874de637e2557867fbe7aeab07eb7685",
+  "accepted_changes": [
+    "RC16 projection weight/metadata reuse with per-request split-K preservation",
+    "Consumer-specific activation staging",
+    "Exact GDN invariant hoisting and short convolution-tail race fix",
+    "SiLU and activation quantization fusion for decode",
+    "Single-wait argmax readback and ordered asynchronous batch/reset zeroing",
+    "Opt-in measured busy-prefill time target; default disabled"
+  ],
+  "native_prefill": {
+    "quiet-baseline-prefill": {
+      "cases": [
+        {
+          "calls": 1,
+          "chunk_tokens": 512,
+          "consumed_tokens": 512,
+          "mode": "chunked_prefill",
+          "planned_calls": 1,
+          "prompt_tokens": 512,
+          "seconds": 0.8339171040006477,
+          "seconds_per_token": 0.001628744343751265,
+          "speedup_vs_loop": null,
+          "status": "passed",
+          "tokens_per_second": 613.9698988589187
+        },
+        {
+          "calls": 1,
+          "chunk_tokens": 512,
+          "consumed_tokens": 512,
+          "mode": "chunked_prefill",
+          "planned_calls": 1,
+          "prompt_tokens": 512,
+          "seconds": 0.8379599769996275,
+          "seconds_per_token": 0.0016366405800773975,
+          "speedup_vs_loop": null,
+          "status": "passed",
+          "tokens_per_second": 611.0077021020153
+        },
+        {
+          "calls": 4,
+          "chunk_tokens": 512,
+          "consumed_tokens": 2048,
+          "mode": "chunked_prefill",
+          "planned_calls": 4,
+          "prompt_tokens": 2048,
+          "seconds": 3.5444903199986584,
+          "seconds_per_token": 0.001730708164061845,
+          "speedup_vs_loop": null,
+          "status": "passed",
+          "tokens_per_second": 577.7981642225998
+        },
+        {
+          "calls": 4,
+          "chunk_tokens": 512,
+          "consumed_tokens": 2048,
+          "mode": "chunked_prefill",
+          "planned_calls": 4,
+          "prompt_tokens": 2048,
+          "seconds": 3.5407841809992533,
+          "seconds_per_token": 0.0017288985258785416,
+          "speedup_vs_loop": null,
+          "status": "passed",
+          "tokens_per_second": 578.4029455932638
+        },
+        {
+          "calls": 16,
+          "chunk_tokens": 512,
+          "consumed_tokens": 8192,
+          "mode": "chunked_prefill",
+          "planned_calls": 16,
+          "prompt_tokens": 8192,
+          "seconds": 17.23741420099941,
+          "seconds_per_token": 0.002104176538207936,
+          "speedup_vs_loop": null,
+          "status": "passed",
+          "tokens_per_second": 475.24529517455323
+        },
+        {
+          "calls": 16,
+          "chunk_tokens": 512,
+          "consumed_tokens": 8192,
+          "mode": "chunked_prefill",
+          "planned_calls": 16,
+          "prompt_tokens": 8192,
+          "seconds": 17.27632765799899,
+          "seconds_per_token": 0.00210892671606433,
+          "speedup_vs_loop": null,
+          "status": "passed",
+          "tokens_per_second": 474.1748456135051
+        },
+        {
+          "calls": 32,
+          "chunk_tokens": 512,
+          "consumed_tokens": 16384,
+          "mode": "chunked_prefill",
+          "planned_calls": 32,
+          "prompt_tokens": 16384,
+          "seconds": 43.115556655000546,
+          "seconds_per_token": 0.0026315647372436857,
+          "speedup_vs_loop": null,
+          "status": "passed",
+          "tokens_per_second": 380.002051953092
+        }
+      ],
+      "configuration": {
+        "chunk": 512,
+        "contexts": [
+          512,
+          512,
+          2048,
+          2048,
+          8192,
+          8192,
+          16384
+        ],
+        "loop_ref": 0
+      },
+      "library": {
+        "bytes": 1273152,
+        "device": 66306,
+        "inode": 23629681,
+        "mtime_ns": 1788891647397897613,
+        "path": "xpu/build/optimization-20260908-142035/libbaseline.so",
+        "sha256": "46343dbdb682e935bdd512b98aa1e2182978b2f74778ace13a7dabfb24919175"
+      },
+      "library_path": "xpu/build/optimization-20260908-142035/libbaseline.so",
+      "model_path": "$TQF",
+      "pid": 62786,
+      "prompt_construction": "repeat template and truncate to requested tokens",
+      "prompt_template": [
+        151644,
+        872,
+        198,
+        9707,
+        11,
+        1246,
+        525,
+        498,
+        30,
+        151645,
+        198
+      ],
+      "schema": "bench_prefill/v1",
+      "status": "passed",
+      "timing_scope": "reset excluded; prompt construction excluded; chunk ctypes array construction included; native calls included",
+      "tq_env": {
+        "TQ_CTX": "16384",
+        "TQ_XPU_DEV": "0",
+        "TQ_XPU_K64": "gate,up,down",
+        "TQ_XPU_KV_PAGE": "128",
+        "TQ_XPU_KV_POOL_TOKENS": "16384",
+        "TQ_XPU_PAGED": "1",
+        "TQ_XPU_PREFILL_XMX": "auto",
+        "TQ_XPU_SLOTS": "2",
+        "TQ_XPU_TP": "1"
+      }
+    },
+    "quiet-final-prefill": {
+      "cases": [
+        {
+          "calls": 1,
+          "chunk_tokens": 512,
+          "consumed_tokens": 512,
+          "mode": "chunked_prefill",
+          "planned_calls": 1,
+          "prompt_tokens": 512,
+          "seconds": 0.651046953000332,
+          "seconds_per_token": 0.0012715760800787734,
+          "speedup_vs_loop": null,
+          "status": "passed",
+          "tokens_per_second": 786.4256143746039
+        },
+        {
+          "calls": 1,
+          "chunk_tokens": 512,
+          "consumed_tokens": 512,
+          "mode": "chunked_prefill",
+          "planned_calls": 1,
+          "prompt_tokens": 512,
+          "seconds": 0.6479628100005357,
+          "seconds_per_token": 0.0012655523632822963,
+          "speedup_vs_loop": null,
+          "status": "passed",
+          "tokens_per_second": 790.1688061380818
+        },
+        {
+          "calls": 4,
+          "chunk_tokens": 512,
+          "consumed_tokens": 2048,
+          "mode": "chunked_prefill",
+          "planned_calls": 4,
+          "prompt_tokens": 2048,
+          "seconds": 2.7794387220001227,
+          "seconds_per_token": 0.0013571478134766224,
+          "speedup_vs_loop": null,
+          "status": "passed",
+          "tokens_per_second": 736.8394142995284
+        },
+        {
+          "calls": 4,
+          "chunk_tokens": 512,
+          "consumed_tokens": 2048,
+          "mode": "chunked_prefill",
+          "planned_calls": 4,
+          "prompt_tokens": 2048,
+          "seconds": 2.7798925019997114,
+          "seconds_per_token": 0.0013573693857420466,
+          "speedup_vs_loop": null,
+          "status": "passed",
+          "tokens_per_second": 736.7191351920171
+        },
+        {
+          "calls": 16,
+          "chunk_tokens": 512,
+          "consumed_tokens": 8192,
+          "mode": "chunked_prefill",
+          "planned_calls": 16,
+          "prompt_tokens": 8192,
+          "seconds": 14.338000208999802,
+          "seconds_per_token": 0.001750244166137671,
+          "speedup_vs_loop": null,
+          "status": "passed",
+          "tokens_per_second": 571.3488548324873
+        },
+        {
+          "calls": 16,
+          "chunk_tokens": 512,
+          "consumed_tokens": 8192,
+          "mode": "chunked_prefill",
+          "planned_calls": 16,
+          "prompt_tokens": 8192,
+          "seconds": 14.360107660000722,
+          "seconds_per_token": 0.0017529428295899319,
+          "speedup_vs_loop": null,
+          "status": "passed",
+          "tokens_per_second": 570.469260674024
+        },
+        {
+          "calls": 32,
+          "chunk_tokens": 512,
+          "consumed_tokens": 16384,
+          "mode": "chunked_prefill",
+          "planned_calls": 32,
+          "prompt_tokens": 16384,
+          "seconds": 37.430913826001415,
+          "seconds_per_token": 0.0022846016739502817,
+          "speedup_vs_loop": null,
+          "status": "passed",
+          "tokens_per_second": 437.7130645583876
+        }
+      ],
+      "configuration": {
+        "chunk": 512,
+        "contexts": [
+          512,
+          512,
+          2048,
+          2048,
+          8192,
+          8192,
+          16384
+        ],
+        "loop_ref": 0
+      },
+      "library": {
+        "bytes": 1319096,
+        "device": 66306,
+        "inode": 23631093,
+        "mtime_ns": 1788894681164217703,
+        "path": "xpu/build/optimization-20260908-142035/libfinal.so",
+        "sha256": "508c9cbc8ed72e16d7dafff550d49b3a874de637e2557867fbe7aeab07eb7685"
+      },
+      "library_path": "xpu/build/optimization-20260908-142035/libfinal.so",
+      "model_path": "$TQF",
+      "pid": 65281,
+      "prompt_construction": "repeat template and truncate to requested tokens",
+      "prompt_template": [
+        151644,
+        872,
+        198,
+        9707,
+        11,
+        1246,
+        525,
+        498,
+        30,
+        151645,
+        198
+      ],
+      "schema": "bench_prefill/v1",
+      "status": "passed",
+      "timing_scope": "reset excluded; prompt construction excluded; chunk ctypes array construction included; native calls included",
+      "tq_env": {
+        "TQ_CTX": "16384",
+        "TQ_XPU_DEV": "0",
+        "TQ_XPU_K64": "gate,up,down",
+        "TQ_XPU_KV_PAGE": "128",
+        "TQ_XPU_KV_POOL_TOKENS": "16384",
+        "TQ_XPU_PAGED": "1",
+        "TQ_XPU_PREFILL_XMX": "auto",
+        "TQ_XPU_SLOTS": "2",
+        "TQ_XPU_TP": "1"
+      }
+    }
+  },
+  "http_pair": {
+    "baseline-http-pair-current-metadata": {
+      "status": "pass",
+      "arguments": {
+        "base_url": "http://127.0.0.1:8110/v1",
+        "benchmark_phase": "cold",
+        "cancel_scenario": null,
+        "conc": 8,
+        "expect_apc": "off",
+        "expect_layout": "paged",
+        "gen": 32,
+        "gen128": false,
+        "mixed": [
+          2048,
+          4096
+        ],
+        "model": "knivesysl-xe-qwen3.8-27b-w4a8",
+        "model_dir": "$MODEL_DIR",
+        "output": "xpu/build/optimization-20260908-142035/baseline-http-pair-current-metadata.json",
+        "repeats": 2,
+        "timeout": 180.0
+      },
+      "phases": [
+        {
+          "wall_seconds": 15.180646021000939,
+          "requests": [
+            {
+              "prompt_tokens_local": 2048,
+              "generated_output_tokens": 32,
+              "ttft_ms": 8354.5,
+              "itl_ms_p50": 215.3,
+              "itl_ms_p99": 235.8,
+              "batch_avg": 1.19
+            },
+            {
+              "prompt_tokens_local": 4096,
+              "generated_output_tokens": 32,
+              "ttft_ms": 14172.4,
+              "itl_ms_p50": 32.4,
+              "itl_ms_p99": 32.4,
+              "batch_avg": 1.0
+            }
+          ]
+        },
+        {
+          "wall_seconds": 15.23190354899998,
+          "requests": [
+            {
+              "prompt_tokens_local": 2048,
+              "generated_output_tokens": 32,
+              "ttft_ms": 8397.2,
+              "itl_ms_p50": 215.5,
+              "itl_ms_p99": 236.4,
+              "batch_avg": 1.19
+            },
+            {
+              "prompt_tokens_local": 4096,
+              "generated_output_tokens": 32,
+              "ttft_ms": 14224.2,
+              "itl_ms_p50": 32.4,
+              "itl_ms_p99": 32.4,
+              "batch_avg": 1.0
+            }
+          ]
+        }
+      ]
+    },
+    "final-http-pair": {
+      "status": "pass",
+      "arguments": {
+        "base_url": "http://127.0.0.1:8110/v1",
+        "benchmark_phase": "cold",
+        "cancel_scenario": null,
+        "conc": 8,
+        "expect_apc": "off",
+        "expect_layout": "paged",
+        "gen": 32,
+        "gen128": false,
+        "mixed": [
+          2048,
+          4096
+        ],
+        "model": "knivesysl-xe-qwen3.8-27b-w4a8",
+        "model_dir": "$MODEL_DIR",
+        "output": "xpu/build/optimization-20260908-142035/final-http-pair.json",
+        "repeats": 2,
+        "timeout": 180.0
+      },
+      "phases": [
+        {
+          "wall_seconds": 13.02882006300024,
+          "requests": [
+            {
+              "prompt_tokens_local": 2048,
+              "generated_output_tokens": 32,
+              "ttft_ms": 6845.0,
+              "itl_ms_p50": 190.8,
+              "itl_ms_p99": 208.7,
+              "batch_avg": 1.19
+            },
+            {
+              "prompt_tokens_local": 4096,
+              "generated_output_tokens": 32,
+              "ttft_ms": 12023.3,
+              "itl_ms_p50": 32.3,
+              "itl_ms_p99": 32.3,
+              "batch_avg": 1.0
+            }
+          ]
+        },
+        {
+          "wall_seconds": 13.08124212200164,
+          "requests": [
+            {
+              "prompt_tokens_local": 2048,
+              "generated_output_tokens": 32,
+              "ttft_ms": 6883.0,
+              "itl_ms_p50": 191.1,
+              "itl_ms_p99": 208.9,
+              "batch_avg": 1.19
+            },
+            {
+              "prompt_tokens_local": 4096,
+              "generated_output_tokens": 32,
+              "ttft_ms": 12073.8,
+              "itl_ms_p50": 32.4,
+              "itl_ms_p99": 32.5,
+              "batch_avg": 1.0
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "mixed_latency": {
+    "baseline-mixed-latency": {
+      "ok": true,
+      "args": {
+        "base_url": "http://127.0.0.1:8110/v1",
+        "model_dir": "$MODEL_DIR",
+        "model": null,
+        "decode_prompt_tokens": 64,
+        "decode_gen_tokens": 96,
+        "incoming_prompt_tokens": 2048,
+        "incoming_gen_tokens": 16,
+        "trigger_event": 8,
+        "seed": 20260908,
+        "repeats": 3,
+        "warmup": 1,
+        "timeout": 60,
+        "deadline": 600,
+        "label": "unlabelled",
+        "output": "xpu/build/optimization-20260908-142035/baseline-mixed-latency.json"
+      },
+      "workload_sha256": "1717e84067275354c611c251ca1c4bf710255df18f79c2eab479fa8819db3460",
+      "completed_pairs": 3,
+      "metric_definitions": {
+        "clock": "All *_s event timestamps are client perf_counter seconds relative to clock_origin; UTC is correlation only.",
+        "submit": "Client timestamp immediately before HTTP POST (includes connection setup, upload, queueing); not server admission.",
+        "observation": "Timestamp when the SSE blank-line delimiter is read, before JSON parsing. Full SSE data events including finish, usage and DONE are retained.",
+        "output_event_times_s": "Nonempty raw-completion text event observations, not native token timestamps. UTF-8 buffering and empty token text can make event count differ from generated-token usage. Empty/finish/usage/DONE events remain in events but do not enter gap distributions. Event-count equality is reported descriptively, not claimed as proof of native token timings.",
+        "trigger": "Incoming worker is released at the one-based Nth nonempty decode output event, without sleeps. Actual submit timestamp, thread wakeup lag and decode-event count at submit are retained. This is an event-index trigger, never an exact native-token-index claim.",
+        "ttft_ms": "1000 * (first nonempty output event observation - request submit); includes HTTP, queueing, prefill and buffering, not pure device prefill.",
+        "event_gaps_ms": "1000 * (consecutive nonempty output event observation difference), excluding TTFT; exactly observed_output_events - 1 samples. Client event gaps are not native ITL. server_latency_ms reports the server's native ttft_ms, itl_ms_p50 and itl_ms_p99 separately without reconstructing unavailable token times.",
+        "prefill_proxy": "Incoming submit through its first output observation, not instrumented server prefill. Includes upload, admission, queueing, first decode and network. No actual GPU overlap is inferred.",
+        "phase_assignment": "Whole decode event intervals (left,right] are before if right <= incoming submit, after if left >= incoming first output, during if left >= submit and right <= first output; remaining boundary-crossing intervals go ONLY to crossing. Before/during/after distributions exclude crossings to avoid smearing a stall. Crossings retain exact per-window overlap durations, not fabricated split-event samples. Missing boundaries yield unclassified (or wholly-before when submit is known).",
+        "control": "Lone decode uses identical prompt, generation length and trigger marker. It has no incoming-prefill windows; its entire event-gap distribution is the control, not fabricated during/after phases.",
+        "no_intervals": "Zero phase interval count and null quantiles mean not observed, never zero latency. A crossing-only window may have real time overlap but no wholly-contained event-gap samples.",
+        "distribution": "Count, min, arithmetic mean, max and linearly interpolated percentiles at rank (n-1)*q. Empty samples give null statistics. Summary pools individual intervals, not per-trial percentiles; only fully valid matched pairs contribute.",
+        "wall_s": "Request: submit through stream end after DONE parsing (before connection teardown). Trial: earliest request submit to latest stream end. Excludes health probes, idle settling and warmup; includes prompt processing and both requests for mixed trials.",
+        "output_tokens_per_s": "Validated completion-token count / end-to-end wall_s; trial numerator sums both streams. Not steady-state decode throughput.",
+        "health_delta": "Recursive numeric after-minus-before snapshots; booleans excluded; newly added numeric histogram bins start at zero. Includes gauges/rates/lifetime peaks, whose differences are not event counts. No health polling while streams run. Before/after idle checks do not exclude unrelated external traffic during a trial.",
+        "overlap_attestation": "A qualifying mixed trial requires incoming request_sent_s < decode DONE observation, incoming first output > trigger observation, and at least one decode output event in [incoming submit, incoming first output). request_sent_s is after HTTPConnection.request returns (all request bytes handed to the local socket); this attests client-observed concurrency, not server-admission or GPU execution overlap. Non-overlap is explicitly reported as a failed trial, not silently assumed or retried.",
+        "paired_delta": "Within-repeat mixed minus control for decode TTFT, wall, mean event gap and output throughput. Trials alternate control/mixed and mixed/control by repeat index, deterministically.",
+        "workload_identity": "SHA256 of exact prompts/token IDs, seed, generation sizes, trigger, repeat order and warmup prompts. Excludes URL, model-dir, output path and label; compare workload_sha256 across baseline/candidate. Server/model equivalence still requires inspecting health/model/tokenizer metadata."
+      },
+      "summary": {
+        "control": {
+          "matched_trial_count": 3,
+          "requests": {
+            "decode": {
+              "request_count": 3,
+              "ttft_distribution_ms": {
+                "count": 3,
+                "no_samples": false,
+                "min": 348.05817900087277,
+                "mean": 348.28185066665657,
+                "p50": 348.059457999625,
+                "p90": 348.5942235995026,
+                "p95": 348.6610692994873,
+                "p99": 348.71454585947504,
+                "max": 348.727914999472
+              },
+              "pooled_event_gap_distribution_ms": {
+                "count": 285,
+                "no_samples": false,
+                "min": 28.901355000925832,
+                "mean": 29.284541831574437,
+                "p50": 29.275120999955107,
+                "p90": 29.3335330006812,
+                "p95": 29.350495800099452,
+                "p99": 29.600352359411776,
+                "max": 31.09970399964368
+              },
+              "wall_distribution_s": {
+                "count": 3,
+                "no_samples": false,
+                "min": 3.1286603820008168,
+                "mean": 3.1304333396668276,
+                "p50": 3.1287843469999643,
+                "p90": 3.132841101399754,
+                "p95": 3.1333481956997273,
+                "p99": 3.1337538711397066,
+                "max": 3.133855289999701
+              },
+              "output_tokens_per_s_distribution": {
+                "count": 3,
+                "no_samples": false,
+                "min": 30.633194936071586,
+                "mean": 30.666699122290154,
+                "p50": 30.682843351619816,
+                "p90": 30.683815933667216,
+                "p95": 30.68393750642314,
+                "p99": 30.684034764627878,
+                "max": 30.684059079179065
+              },
+              "server_reported_latency_distributions_ms": {
+                "ttft_ms": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 347.5,
+                  "mean": 347.76666666666665,
+                  "p50": 347.6,
+                  "p90": 348.08,
+                  "p95": 348.14,
+                  "p99": 348.188,
+                  "max": 348.2
+                },
+                "itl_ms_p50": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 29.3,
+                  "mean": 29.3,
+                  "p50": 29.3,
+                  "p90": 29.3,
+                  "p95": 29.3,
+                  "p99": 29.3,
+                  "max": 29.3
+                },
+                "itl_ms_p99": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 29.3,
+                  "mean": 29.400000000000002,
+                  "p50": 29.4,
+                  "p90": 29.48,
+                  "p95": 29.49,
+                  "p99": 29.498,
+                  "max": 29.5
+                }
+              }
+            },
+            "incoming": {
+              "request_count": 0,
+              "ttft_distribution_ms": {
+                "count": 0,
+                "no_samples": true,
+                "min": null,
+                "mean": null,
+                "p50": null,
+                "p90": null,
+                "p95": null,
+                "p99": null,
+                "max": null
+              },
+              "pooled_event_gap_distribution_ms": {
+                "count": 0,
+                "no_samples": true,
+                "min": null,
+                "mean": null,
+                "p50": null,
+                "p90": null,
+                "p95": null,
+                "p99": null,
+                "max": null
+              },
+              "wall_distribution_s": {
+                "count": 0,
+                "no_samples": true,
+                "min": null,
+                "mean": null,
+                "p50": null,
+                "p90": null,
+                "p95": null,
+                "p99": null,
+                "max": null
+              },
+              "output_tokens_per_s_distribution": {
+                "count": 0,
+                "no_samples": true,
+                "min": null,
+                "mean": null,
+                "p50": null,
+                "p90": null,
+                "p95": null,
+                "p99": null,
+                "max": null
+              },
+              "server_reported_latency_distributions_ms": {
+                "ttft_ms": {
+                  "count": 0,
+                  "no_samples": true,
+                  "min": null,
+                  "mean": null,
+                  "p50": null,
+                  "p90": null,
+                  "p95": null,
+                  "p99": null,
+                  "max": null
+                },
+                "itl_ms_p50": {
+                  "count": 0,
+                  "no_samples": true,
+                  "min": null,
+                  "mean": null,
+                  "p50": null,
+                  "p90": null,
+                  "p95": null,
+                  "p99": null,
+                  "max": null
+                },
+                "itl_ms_p99": {
+                  "count": 0,
+                  "no_samples": true,
+                  "min": null,
+                  "mean": null,
+                  "p50": null,
+                  "p90": null,
+                  "p95": null,
+                  "p99": null,
+                  "max": null
+                }
+              }
+            }
+          },
+          "wall_distribution_s": {
+            "count": 3,
+            "no_samples": false,
+            "min": 3.1286603820008168,
+            "mean": 3.1304333396668276,
+            "p50": 3.1287843469999643,
+            "p90": 3.132841101399754,
+            "p95": 3.1333481956997273,
+            "p99": 3.1337538711397066,
+            "max": 3.133855289999701
+          },
+          "output_tokens_per_s_distribution": {
+            "count": 3,
+            "no_samples": false,
+            "min": 30.633194936071586,
+            "mean": 30.666699122290154,
+            "p50": 30.682843351619816,
+            "p90": 30.683815933667216,
+            "p95": 30.68393750642314,
+            "p99": 30.684034764627878,
+            "max": 30.684059079179065
+          }
+        },
+        "mixed": {
+          "matched_trial_count": 3,
+          "requests": {
+            "decode": {
+              "request_count": 3,
+              "ttft_distribution_ms": {
+                "count": 3,
+                "no_samples": false,
+                "min": 347.54061800049385,
+                "mean": 347.93328700046305,
+                "p50": 347.90320200045244,
+                "p90": 348.26547320044483,
+                "p95": 348.3107571004439,
+                "p99": 348.3469842204431,
+                "max": 348.35604100044293
+              },
+              "pooled_event_gap_distribution_ms": {
+                "count": 285,
+                "no_samples": false,
+                "min": 28.464638999139424,
+                "mean": 80.23526045614281,
+                "p50": 41.57629200017254,
+                "p90": 179.4668308004475,
+                "p95": 185.8450815991091,
+                "p99": 190.43982779963702,
+                "max": 191.52498899893544
+              },
+              "wall_distribution_s": {
+                "count": 3,
+                "no_samples": false,
+                "min": 7.968630197001403,
+                "mean": 7.970390011001048,
+                "p50": 7.969204041000921,
+                "p90": 7.972509444200841,
+                "p95": 7.972922619600832,
+                "p99": 7.973253159920823,
+                "max": 7.973335795000821
+              },
+              "output_tokens_per_s_distribution": {
+                "count": 3,
+                "no_samples": false,
+                "min": 12.040130062023822,
+                "mean": 12.044580817996051,
+                "p50": 12.046372449003393,
+                "p90": 12.04706644416943,
+                "p95": 12.047153193565185,
+                "p99": 12.047222593081788,
+                "max": 12.047239942960939
+              },
+              "server_reported_latency_distributions_ms": {
+                "ttft_ms": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 347.0,
+                  "mean": 347.3666666666666,
+                  "p50": 347.3,
+                  "p90": 347.7,
+                  "p95": 347.75,
+                  "p99": 347.79,
+                  "max": 347.8
+                },
+                "itl_ms_p50": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 41.5,
+                  "mean": 41.56666666666667,
+                  "p50": 41.6,
+                  "p90": 41.6,
+                  "p95": 41.6,
+                  "p99": 41.6,
+                  "max": 41.6
+                },
+                "itl_ms_p99": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 190.1,
+                  "mean": 190.20000000000002,
+                  "p50": 190.2,
+                  "p90": 190.28,
+                  "p95": 190.29000000000002,
+                  "p99": 190.298,
+                  "max": 190.3
+                }
+              }
+            },
+            "incoming": {
+              "request_count": 3,
+              "ttft_distribution_ms": {
+                "count": 3,
+                "no_samples": false,
+                "min": 5850.403641999947,
+                "mean": 5851.655595666671,
+                "p50": 5851.743866000106,
+                "p90": 5852.604196399989,
+                "p95": 5852.711737699974,
+                "p99": 5852.797770739962,
+                "max": 5852.819278999959
+              },
+              "pooled_event_gap_distribution_ms": {
+                "count": 45,
+                "no_samples": false,
+                "min": 41.23482899922237,
+                "mean": 41.765916600019814,
+                "p50": 41.72420900067664,
+                "p90": 42.012074000012944,
+                "p95": 42.08018920071481,
+                "p99": 42.44589264024398,
+                "max": 42.5527110000985
+              },
+              "wall_distribution_s": {
+                "count": 3,
+                "no_samples": false,
+                "min": 6.477135205001105,
+                "mean": 6.478294087333173,
+                "p50": 6.477916304998871,
+                "p90": 6.479447862599409,
+                "p95": 6.479639307299476,
+                "p99": 6.47979246305953,
+                "max": 6.479830751999543
+              },
+              "output_tokens_per_s_distribution": {
+                "count": 3,
+                "no_samples": false,
+                "min": 2.469200294322923,
+                "mean": 2.4697860691644373,
+                "p50": 2.4699300279093044,
+                "p90": 2.470168313790728,
+                "p95": 2.4701980995259065,
+                "p99": 2.4702219281140487,
+                "max": 2.4702278852610844
+              },
+              "server_reported_latency_distributions_ms": {
+                "ttft_ms": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 5848.3,
+                  "mean": 5849.599999999999,
+                  "p50": 5849.8,
+                  "p90": 5850.5199999999995,
+                  "p95": 5850.61,
+                  "p99": 5850.682,
+                  "max": 5850.7
+                },
+                "itl_ms_p50": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 41.6,
+                  "mean": 41.699999999999996,
+                  "p50": 41.7,
+                  "p90": 41.78,
+                  "p95": 41.79,
+                  "p99": 41.797999999999995,
+                  "max": 41.8
+                },
+                "itl_ms_p99": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 42.0,
+                  "mean": 42.266666666666666,
+                  "p50": 42.3,
+                  "p90": 42.46,
+                  "p95": 42.48,
+                  "p99": 42.496,
+                  "max": 42.5
+                }
+              }
+            }
+          },
+          "wall_distribution_s": {
+            "count": 3,
+            "no_samples": false,
+            "min": 7.968630197001403,
+            "mean": 7.970390011001048,
+            "p50": 7.969204041000921,
+            "p90": 7.972509444200841,
+            "p95": 7.972922619600832,
+            "p99": 7.973253159920823,
+            "max": 7.973335795000821
+          },
+          "output_tokens_per_s_distribution": {
+            "count": 3,
+            "no_samples": false,
+            "min": 14.04681840569446,
+            "mean": 14.052010954328727,
+            "p50": 14.054101190503959,
+            "p90": 14.054910851531002,
+            "p95": 14.055012059159381,
+            "p99": 14.055093025262085,
+            "max": 14.055113266787762
+          },
+          "decode_phase_pooled_event_gaps_ms": {
+            "before": {
+              "count": 21,
+              "no_samples": false,
+              "min": 28.464638999139424,
+              "mean": 29.333275809438504,
+              "p50": 29.220377999081393,
+              "p90": 29.25202000005811,
+              "p95": 29.279400998348137,
+              "p99": 31.790916999307232,
+              "max": 32.418795999547
+            },
+            "during": {
+              "count": 118,
+              "no_samples": false,
+              "min": 41.421207000894356,
+              "mean": 147.3218531101816,
+              "p50": 167.63971950058476,
+              "p90": 186.56608690052963,
+              "p95": 189.0267690503606,
+              "p99": 191.51121846003662,
+              "max": 191.52498899893544
+            },
+            "after": {
+              "count": 140,
+              "no_samples": false,
+              "min": 29.24337900003593,
+              "mean": 33.24422447143921,
+              "p50": 29.34345299945562,
+              "p90": 41.913453000597656,
+              "p95": 41.9736330496562,
+              "p99": 42.21492508990195,
+              "max": 42.62163400017016
+            },
+            "crossing": {
+              "count": 6,
+              "no_samples": false,
+              "min": 29.205408000052557,
+              "mean": 35.480057499929295,
+              "p50": 35.38096499960375,
+              "p90": 41.83421849938895,
+              "p95": 41.93937024911065,
+              "p99": 42.02349164888801,
+              "max": 42.04452199883235
+            },
+            "unclassified": {
+              "count": 0,
+              "no_samples": true,
+              "min": null,
+              "mean": null,
+              "p50": null,
+              "p90": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          }
+        }
+      }
+    },
+    "safe-static-mixed": {
+      "ok": true,
+      "args": {
+        "base_url": "http://127.0.0.1:8110/v1",
+        "model_dir": "$MODEL_DIR",
+        "model": null,
+        "decode_prompt_tokens": 64,
+        "decode_gen_tokens": 96,
+        "incoming_prompt_tokens": 2048,
+        "incoming_gen_tokens": 16,
+        "trigger_event": 8,
+        "seed": 20260908,
+        "repeats": 3,
+        "warmup": 1,
+        "timeout": 60,
+        "deadline": 600,
+        "label": "unlabelled",
+        "output": "xpu/build/optimization-20260908-142035/safe-static-mixed.json"
+      },
+      "workload_sha256": "1717e84067275354c611c251ca1c4bf710255df18f79c2eab479fa8819db3460",
+      "completed_pairs": 3,
+      "metric_definitions": {
+        "clock": "All *_s event timestamps are client perf_counter seconds relative to clock_origin; UTC is correlation only.",
+        "submit": "Client timestamp immediately before HTTP POST (includes connection setup, upload, queueing); not server admission.",
+        "observation": "Timestamp when the SSE blank-line delimiter is read, before JSON parsing. Full SSE data events including finish, usage and DONE are retained.",
+        "output_event_times_s": "Nonempty raw-completion text event observations, not native token timestamps. UTF-8 buffering and empty token text can make event count differ from generated-token usage. Empty/finish/usage/DONE events remain in events but do not enter gap distributions. Event-count equality is reported descriptively, not claimed as proof of native token timings.",
+        "trigger": "Incoming worker is released at the one-based Nth nonempty decode output event, without sleeps. Actual submit timestamp, thread wakeup lag and decode-event count at submit are retained. This is an event-index trigger, never an exact native-token-index claim.",
+        "ttft_ms": "1000 * (first nonempty output event observation - request submit); includes HTTP, queueing, prefill and buffering, not pure device prefill.",
+        "event_gaps_ms": "1000 * (consecutive nonempty output event observation difference), excluding TTFT; exactly observed_output_events - 1 samples. Client event gaps are not native ITL. server_latency_ms reports the server's native ttft_ms, itl_ms_p50 and itl_ms_p99 separately without reconstructing unavailable token times.",
+        "prefill_proxy": "Incoming submit through its first output observation, not instrumented server prefill. Includes upload, admission, queueing, first decode and network. No actual GPU overlap is inferred.",
+        "phase_assignment": "Whole decode event intervals (left,right] are before if right <= incoming submit, after if left >= incoming first output, during if left >= submit and right <= first output; remaining boundary-crossing intervals go ONLY to crossing. Before/during/after distributions exclude crossings to avoid smearing a stall. Crossings retain exact per-window overlap durations, not fabricated split-event samples. Missing boundaries yield unclassified (or wholly-before when submit is known).",
+        "control": "Lone decode uses identical prompt, generation length and trigger marker. It has no incoming-prefill windows; its entire event-gap distribution is the control, not fabricated during/after phases.",
+        "no_intervals": "Zero phase interval count and null quantiles mean not observed, never zero latency. A crossing-only window may have real time overlap but no wholly-contained event-gap samples.",
+        "distribution": "Count, min, arithmetic mean, max and linearly interpolated percentiles at rank (n-1)*q. Empty samples give null statistics. Summary pools individual intervals, not per-trial percentiles; only fully valid matched pairs contribute.",
+        "wall_s": "Request: submit through stream end after DONE parsing (before connection teardown). Trial: earliest request submit to latest stream end. Excludes health probes, idle settling and warmup; includes prompt processing and both requests for mixed trials.",
+        "output_tokens_per_s": "Validated completion-token count / end-to-end wall_s; trial numerator sums both streams. Not steady-state decode throughput.",
+        "health_delta": "Recursive numeric after-minus-before snapshots; booleans excluded; newly added numeric histogram bins start at zero. Includes gauges/rates/lifetime peaks, whose differences are not event counts. No health polling while streams run. Before/after idle checks do not exclude unrelated external traffic during a trial.",
+        "overlap_attestation": "A qualifying mixed trial requires incoming request_sent_s < decode DONE observation, incoming first output > trigger observation, and at least one decode output event in [incoming submit, incoming first output). request_sent_s is after HTTPConnection.request returns (all request bytes handed to the local socket); this attests client-observed concurrency, not server-admission or GPU execution overlap. Non-overlap is explicitly reported as a failed trial, not silently assumed or retried.",
+        "paired_delta": "Within-repeat mixed minus control for decode TTFT, wall, mean event gap and output throughput. Trials alternate control/mixed and mixed/control by repeat index, deterministically.",
+        "workload_identity": "SHA256 of exact prompts/token IDs, seed, generation sizes, trigger, repeat order and warmup prompts. Excludes URL, model-dir, output path and label; compare workload_sha256 across baseline/candidate. Server/model equivalence still requires inspecting health/model/tokenizer metadata."
+      },
+      "summary": {
+        "control": {
+          "matched_trial_count": 3,
+          "requests": {
+            "decode": {
+              "request_count": 3,
+              "ttft_distribution_ms": {
+                "count": 3,
+                "no_samples": false,
+                "min": 342.3248359995341,
+                "mean": 342.5149636665689,
+                "p50": 342.4722119998478,
+                "p90": 342.6927168002294,
+                "p95": 342.7202799002771,
+                "p99": 342.74233038031525,
+                "max": 342.7478430003248
+              },
+              "pooled_event_gap_distribution_ms": {
+                "count": 285,
+                "no_samples": false,
+                "min": 28.95341800103779,
+                "mean": 29.160555957895937,
+                "p50": 29.153337000025203,
+                "p90": 29.22226560112904,
+                "p95": 29.250882000633283,
+                "p99": 29.424403960001655,
+                "max": 29.518170998926507
+              },
+              "wall_distribution_s": {
+                "count": 3,
+                "no_samples": false,
+                "min": 3.11120045700045,
+                "mean": 3.112888837667318,
+                "p50": 3.1126486049997766,
+                "p90": 3.114383681801337,
+                "p95": 3.114600566401532,
+                "p99": 3.114774074081688,
+                "max": 3.114817451001727
+              },
+              "output_tokens_per_s_distribution": {
+                "count": 3,
+                "no_samples": false,
+                "min": 30.820425758538867,
+                "mean": 30.83952781206705,
+                "p50": 30.841900960422382,
+                "p90": 30.8533855658764,
+                "p95": 30.85482114155815,
+                "p99": 30.855969602103553,
+                "max": 30.856256717239905
+              },
+              "server_reported_latency_distributions_ms": {
+                "ttft_ms": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 341.7,
+                  "mean": 341.9666666666667,
+                  "p50": 342.0,
+                  "p90": 342.15999999999997,
+                  "p95": 342.18,
+                  "p99": 342.19599999999997,
+                  "max": 342.2
+                },
+                "itl_ms_p50": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 29.1,
+                  "mean": 29.133333333333336,
+                  "p50": 29.1,
+                  "p90": 29.18,
+                  "p95": 29.189999999999998,
+                  "p99": 29.198,
+                  "max": 29.2
+                },
+                "itl_ms_p99": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 29.2,
+                  "mean": 29.3,
+                  "p50": 29.3,
+                  "p90": 29.38,
+                  "p95": 29.389999999999997,
+                  "p99": 29.398,
+                  "max": 29.4
+                }
+              }
+            },
+            "incoming": {
+              "request_count": 0,
+              "ttft_distribution_ms": {
+                "count": 0,
+                "no_samples": true,
+                "min": null,
+                "mean": null,
+                "p50": null,
+                "p90": null,
+                "p95": null,
+                "p99": null,
+                "max": null
+              },
+              "pooled_event_gap_distribution_ms": {
+                "count": 0,
+                "no_samples": true,
+                "min": null,
+                "mean": null,
+                "p50": null,
+                "p90": null,
+                "p95": null,
+                "p99": null,
+                "max": null
+              },
+              "wall_distribution_s": {
+                "count": 0,
+                "no_samples": true,
+                "min": null,
+                "mean": null,
+                "p50": null,
+                "p90": null,
+                "p95": null,
+                "p99": null,
+                "max": null
+              },
+              "output_tokens_per_s_distribution": {
+                "count": 0,
+                "no_samples": true,
+                "min": null,
+                "mean": null,
+                "p50": null,
+                "p90": null,
+                "p95": null,
+                "p99": null,
+                "max": null
+              },
+              "server_reported_latency_distributions_ms": {
+                "ttft_ms": {
+                  "count": 0,
+                  "no_samples": true,
+                  "min": null,
+                  "mean": null,
+                  "p50": null,
+                  "p90": null,
+                  "p95": null,
+                  "p99": null,
+                  "max": null
+                },
+                "itl_ms_p50": {
+                  "count": 0,
+                  "no_samples": true,
+                  "min": null,
+                  "mean": null,
+                  "p50": null,
+                  "p90": null,
+                  "p95": null,
+                  "p99": null,
+                  "max": null
+                },
+                "itl_ms_p99": {
+                  "count": 0,
+                  "no_samples": true,
+                  "min": null,
+                  "mean": null,
+                  "p50": null,
+                  "p90": null,
+                  "p95": null,
+                  "p99": null,
+                  "max": null
+                }
+              }
+            }
+          },
+          "wall_distribution_s": {
+            "count": 3,
+            "no_samples": false,
+            "min": 3.11120045700045,
+            "mean": 3.112888837667318,
+            "p50": 3.1126486049997766,
+            "p90": 3.114383681801337,
+            "p95": 3.114600566401532,
+            "p99": 3.114774074081688,
+            "max": 3.114817451001727
+          },
+          "output_tokens_per_s_distribution": {
+            "count": 3,
+            "no_samples": false,
+            "min": 30.820425758538867,
+            "mean": 30.83952781206705,
+            "p50": 30.841900960422382,
+            "p90": 30.8533855658764,
+            "p95": 30.85482114155815,
+            "p99": 30.855969602103553,
+            "max": 30.856256717239905
+          }
+        },
+        "mixed": {
+          "matched_trial_count": 3,
+          "requests": {
+            "decode": {
+              "request_count": 3,
+              "ttft_distribution_ms": {
+                "count": 3,
+                "no_samples": false,
+                "min": 341.6844309995213,
+                "mean": 342.09368066634244,
+                "p50": 342.2065920003661,
+                "p90": 342.3533335993852,
+                "p95": 342.3716762992626,
+                "p99": 342.38635045916453,
+                "max": 342.39001899914
+              },
+              "pooled_event_gap_distribution_ms": {
+                "count": 285,
+                "no_samples": false,
+                "min": 28.99229000104242,
+                "mean": 71.15043093333696,
+                "p50": 40.531731998271425,
+                "p90": 154.5371611999144,
+                "p95": 161.11593060013547,
+                "p99": 164.78301815965096,
+                "max": 166.0784040013823
+              },
+              "wall_distribution_s": {
+                "count": 3,
+                "no_samples": false,
+                "min": 7.090861454000333,
+                "mean": 7.101505824333192,
+                "p50": 7.09793964399978,
+                "p90": 7.1121610287995285,
+                "p95": 7.113938701899497,
+                "p99": 7.115360840379472,
+                "max": 7.115716374999465
+              },
+              "output_tokens_per_s_distribution": {
+                "count": 3,
+                "no_samples": false,
+                "min": 13.491262852646683,
+                "mean": 13.518288984025011,
+                "p50": 13.525051608624665,
+                "p90": 13.535852314367876,
+                "p95": 13.537202402585779,
+                "p99": 13.5382824731601,
+                "max": 13.53855249080368
+              },
+              "server_reported_latency_distributions_ms": {
+                "ttft_ms": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 341.2,
+                  "mean": 341.56666666666666,
+                  "p50": 341.6,
+                  "p90": 341.84,
+                  "p95": 341.87,
+                  "p99": 341.894,
+                  "max": 341.9
+                },
+                "itl_ms_p50": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 40.5,
+                  "mean": 40.56666666666667,
+                  "p50": 40.6,
+                  "p90": 40.6,
+                  "p95": 40.6,
+                  "p99": 40.6,
+                  "max": 40.6
+                },
+                "itl_ms_p99": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 164.5,
+                  "mean": 164.66666666666666,
+                  "p50": 164.5,
+                  "p90": 164.9,
+                  "p95": 164.95,
+                  "p99": 164.99,
+                  "max": 165.0
+                }
+              }
+            },
+            "incoming": {
+              "request_count": 3,
+              "ttft_distribution_ms": {
+                "count": 3,
+                "no_samples": false,
+                "min": 5001.5598489990225,
+                "mean": 5012.305275665615,
+                "p50": 5009.951714999261,
+                "p90": 5022.313753398703,
+                "p95": 5023.859008198633,
+                "p99": 5025.095212038577,
+                "max": 5025.404262998563
+              },
+              "pooled_event_gap_distribution_ms": {
+                "count": 45,
+                "no_samples": false,
+                "min": 40.438447998894844,
+                "mean": 40.58064115557095,
+                "p50": 40.58630399958929,
+                "p90": 40.66840699997556,
+                "p95": 40.69295600093028,
+                "p99": 40.76155588045367,
+                "max": 40.79914199974155
+              },
+              "wall_distribution_s": {
+                "count": 3,
+                "no_samples": false,
+                "min": 5.610621967000043,
+                "mean": 5.621151115333002,
+                "p50": 5.61827906399958,
+                "p90": 5.631297664799422,
+                "p95": 5.6329249898994025,
+                "p99": 5.634226849979386,
+                "max": 5.634552314999382
+              },
+              "output_tokens_per_s_distribution": {
+                "count": 3,
+                "no_samples": false,
+                "min": 2.839622228266019,
+                "mean": 2.8464010402557007,
+                "p50": 2.8478471463839687,
+                "p90": 2.8509564261704847,
+                "p95": 2.851345086143799,
+                "p99": 2.851656014122451,
+                "max": 2.8517337461171137
+              },
+              "server_reported_latency_distributions_ms": {
+                "ttft_ms": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 4999.1,
+                  "mean": 5010.066666666667,
+                  "p50": 5007.9,
+                  "p90": 5020.139999999999,
+                  "p95": 5021.67,
+                  "p99": 5022.894,
+                  "max": 5023.2
+                },
+                "itl_ms_p50": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 40.5,
+                  "mean": 40.56666666666667,
+                  "p50": 40.6,
+                  "p90": 40.6,
+                  "p95": 40.6,
+                  "p99": 40.6,
+                  "max": 40.6
+                },
+                "itl_ms_p99": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 40.6,
+                  "mean": 40.699999999999996,
+                  "p50": 40.7,
+                  "p90": 40.78,
+                  "p95": 40.79,
+                  "p99": 40.797999999999995,
+                  "max": 40.8
+                }
+              }
+            }
+          },
+          "wall_distribution_s": {
+            "count": 3,
+            "no_samples": false,
+            "min": 7.090861454000333,
+            "mean": 7.101505824333192,
+            "p50": 7.09793964399978,
+            "p90": 7.1121610287995285,
+            "p95": 7.113938701899497,
+            "p99": 7.115360840379472,
+            "max": 7.115716374999465
+          },
+          "output_tokens_per_s_distribution": {
+            "count": 3,
+            "no_samples": false,
+            "min": 15.739806661421131,
+            "mean": 15.771337148029176,
+            "p50": 15.779226876728774,
+            "p90": 15.791827700095855,
+            "p95": 15.79340280301674,
+            "p99": 15.794662885353448,
+            "max": 15.794977905937625
+          },
+          "decode_phase_pooled_event_gaps_ms": {
+            "before": {
+              "count": 21,
+              "no_samples": false,
+              "min": 28.99229000104242,
+              "mean": 29.098298952400608,
+              "p50": 29.099124998538173,
+              "p90": 29.146255999876303,
+              "p95": 29.166697000619024,
+              "p99": 29.185985801450443,
+              "max": 29.190808001658297
+            },
+            "during": {
+              "count": 119,
+              "no_samples": false,
+              "min": 40.393335999397095,
+              "mean": 125.28722148739949,
+              "p50": 140.30783399903157,
+              "p90": 161.87193479963753,
+              "p95": 164.4060154003455,
+              "p99": 165.18497827983083,
+              "max": 166.0784040013823
+            },
+            "after": {
+              "count": 139,
+              "no_samples": false,
+              "min": 29.001951001191628,
+              "mean": 32.72364718705837,
+              "p50": 29.215669001132483,
+              "p90": 40.609879000112414,
+              "p95": 40.69313910113124,
+              "p99": 40.73285840058816,
+              "max": 40.792191999571514
+            },
+            "crossing": {
+              "count": 6,
+              "no_samples": false,
+              "min": 29.08317299988994,
+              "mean": 34.84037033316175,
+              "p50": 34.83675349980331,
+              "p90": 40.597938999781036,
+              "p95": 40.613511999254115,
+              "p99": 40.62597039883258,
+              "max": 40.629084998727194
+            },
+            "unclassified": {
+              "count": 0,
+              "no_samples": true,
+              "min": null,
+              "mean": null,
+              "p50": null,
+              "p90": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          }
+        }
+      }
+    },
+    "final-target100-mixed": {
+      "ok": true,
+      "args": {
+        "base_url": "http://127.0.0.1:8110/v1",
+        "model_dir": "$MODEL_DIR",
+        "model": null,
+        "decode_prompt_tokens": 64,
+        "decode_gen_tokens": 96,
+        "incoming_prompt_tokens": 2048,
+        "incoming_gen_tokens": 16,
+        "trigger_event": 8,
+        "seed": 20260908,
+        "repeats": 3,
+        "warmup": 1,
+        "timeout": 60,
+        "deadline": 600,
+        "label": "unlabelled",
+        "output": "xpu/build/optimization-20260908-142035/final-target100-mixed.json"
+      },
+      "workload_sha256": "1717e84067275354c611c251ca1c4bf710255df18f79c2eab479fa8819db3460",
+      "completed_pairs": 3,
+      "metric_definitions": {
+        "clock": "All *_s event timestamps are client perf_counter seconds relative to clock_origin; UTC is correlation only.",
+        "submit": "Client timestamp immediately before HTTP POST (includes connection setup, upload, queueing); not server admission.",
+        "observation": "Timestamp when the SSE blank-line delimiter is read, before JSON parsing. Full SSE data events including finish, usage and DONE are retained.",
+        "output_event_times_s": "Nonempty raw-completion text event observations, not native token timestamps. UTF-8 buffering and empty token text can make event count differ from generated-token usage. Empty/finish/usage/DONE events remain in events but do not enter gap distributions. Event-count equality is reported descriptively, not claimed as proof of native token timings.",
+        "trigger": "Incoming worker is released at the one-based Nth nonempty decode output event, without sleeps. Actual submit timestamp, thread wakeup lag and decode-event count at submit are retained. This is an event-index trigger, never an exact native-token-index claim.",
+        "ttft_ms": "1000 * (first nonempty output event observation - request submit); includes HTTP, queueing, prefill and buffering, not pure device prefill.",
+        "event_gaps_ms": "1000 * (consecutive nonempty output event observation difference), excluding TTFT; exactly observed_output_events - 1 samples. Client event gaps are not native ITL. server_latency_ms reports the server's native ttft_ms, itl_ms_p50 and itl_ms_p99 separately without reconstructing unavailable token times.",
+        "prefill_proxy": "Incoming submit through its first output observation, not instrumented server prefill. Includes upload, admission, queueing, first decode and network. No actual GPU overlap is inferred.",
+        "phase_assignment": "Whole decode event intervals (left,right] are before if right <= incoming submit, after if left >= incoming first output, during if left >= submit and right <= first output; remaining boundary-crossing intervals go ONLY to crossing. Before/during/after distributions exclude crossings to avoid smearing a stall. Crossings retain exact per-window overlap durations, not fabricated split-event samples. Missing boundaries yield unclassified (or wholly-before when submit is known).",
+        "control": "Lone decode uses identical prompt, generation length and trigger marker. It has no incoming-prefill windows; its entire event-gap distribution is the control, not fabricated during/after phases.",
+        "no_intervals": "Zero phase interval count and null quantiles mean not observed, never zero latency. A crossing-only window may have real time overlap but no wholly-contained event-gap samples.",
+        "distribution": "Count, min, arithmetic mean, max and linearly interpolated percentiles at rank (n-1)*q. Empty samples give null statistics. Summary pools individual intervals, not per-trial percentiles; only fully valid matched pairs contribute.",
+        "wall_s": "Request: submit through stream end after DONE parsing (before connection teardown). Trial: earliest request submit to latest stream end. Excludes health probes, idle settling and warmup; includes prompt processing and both requests for mixed trials.",
+        "output_tokens_per_s": "Validated completion-token count / end-to-end wall_s; trial numerator sums both streams. Not steady-state decode throughput.",
+        "health_delta": "Recursive numeric after-minus-before snapshots; booleans excluded; newly added numeric histogram bins start at zero. Includes gauges/rates/lifetime peaks, whose differences are not event counts. No health polling while streams run. Before/after idle checks do not exclude unrelated external traffic during a trial.",
+        "overlap_attestation": "A qualifying mixed trial requires incoming request_sent_s < decode DONE observation, incoming first output > trigger observation, and at least one decode output event in [incoming submit, incoming first output). request_sent_s is after HTTPConnection.request returns (all request bytes handed to the local socket); this attests client-observed concurrency, not server-admission or GPU execution overlap. Non-overlap is explicitly reported as a failed trial, not silently assumed or retried.",
+        "paired_delta": "Within-repeat mixed minus control for decode TTFT, wall, mean event gap and output throughput. Trials alternate control/mixed and mixed/control by repeat index, deterministically.",
+        "workload_identity": "SHA256 of exact prompts/token IDs, seed, generation sizes, trigger, repeat order and warmup prompts. Excludes URL, model-dir, output path and label; compare workload_sha256 across baseline/candidate. Server/model equivalence still requires inspecting health/model/tokenizer metadata."
+      },
+      "summary": {
+        "control": {
+          "matched_trial_count": 3,
+          "requests": {
+            "decode": {
+              "request_count": 3,
+              "ttft_distribution_ms": {
+                "count": 3,
+                "no_samples": false,
+                "min": 342.6281289994222,
+                "mean": 342.7109749997423,
+                "p50": 342.701790999854,
+                "p90": 342.7827621999313,
+                "p95": 342.792883599941,
+                "p99": 342.8009807199487,
+                "max": 342.80300499995064
+              },
+              "pooled_event_gap_distribution_ms": {
+                "count": 285,
+                "no_samples": false,
+                "min": 28.93118800056982,
+                "mean": 29.1969488140335,
+                "p50": 29.189028000473627,
+                "p90": 29.28709800071374,
+                "p95": 29.338307799844188,
+                "p99": 29.444832560548093,
+                "max": 29.54779200081248
+              },
+              "wall_distribution_s": {
+                "count": 3,
+                "no_samples": false,
+                "min": 3.113827561999642,
+                "mean": 3.1165222829998434,
+                "p50": 3.114246598999671,
+                "p90": 3.1200434702001076,
+                "p95": 3.120768079100162,
+                "p99": 3.1213477662202056,
+                "max": 3.1214926880002167
+              },
+              "output_tokens_per_s_distribution": {
+                "count": 3,
+                "no_samples": false,
+                "min": 30.754517019709045,
+                "mean": 30.803605290319307,
+                "p50": 30.826075247488824,
+                "p90": 30.82939393250581,
+                "p95": 30.829808768132935,
+                "p99": 30.83014063663463,
+                "max": 30.830223603760057
+              },
+              "server_reported_latency_distributions_ms": {
+                "ttft_ms": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 341.9,
+                  "mean": 342.0333333333333,
+                  "p50": 342.1,
+                  "p90": 342.1,
+                  "p95": 342.1,
+                  "p99": 342.1,
+                  "max": 342.1
+                },
+                "itl_ms_p50": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 29.2,
+                  "mean": 29.2,
+                  "p50": 29.2,
+                  "p90": 29.2,
+                  "p95": 29.2,
+                  "p99": 29.2,
+                  "max": 29.2
+                },
+                "itl_ms_p99": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 29.2,
+                  "mean": 29.3,
+                  "p50": 29.3,
+                  "p90": 29.38,
+                  "p95": 29.389999999999997,
+                  "p99": 29.398,
+                  "max": 29.4
+                }
+              }
+            },
+            "incoming": {
+              "request_count": 0,
+              "ttft_distribution_ms": {
+                "count": 0,
+                "no_samples": true,
+                "min": null,
+                "mean": null,
+                "p50": null,
+                "p90": null,
+                "p95": null,
+                "p99": null,
+                "max": null
+              },
+              "pooled_event_gap_distribution_ms": {
+                "count": 0,
+                "no_samples": true,
+                "min": null,
+                "mean": null,
+                "p50": null,
+                "p90": null,
+                "p95": null,
+                "p99": null,
+                "max": null
+              },
+              "wall_distribution_s": {
+                "count": 0,
+                "no_samples": true,
+                "min": null,
+                "mean": null,
+                "p50": null,
+                "p90": null,
+                "p95": null,
+                "p99": null,
+                "max": null
+              },
+              "output_tokens_per_s_distribution": {
+                "count": 0,
+                "no_samples": true,
+                "min": null,
+                "mean": null,
+                "p50": null,
+                "p90": null,
+                "p95": null,
+                "p99": null,
+                "max": null
+              },
+              "server_reported_latency_distributions_ms": {
+                "ttft_ms": {
+                  "count": 0,
+                  "no_samples": true,
+                  "min": null,
+                  "mean": null,
+                  "p50": null,
+                  "p90": null,
+                  "p95": null,
+                  "p99": null,
+                  "max": null
+                },
+                "itl_ms_p50": {
+                  "count": 0,
+                  "no_samples": true,
+                  "min": null,
+                  "mean": null,
+                  "p50": null,
+                  "p90": null,
+                  "p95": null,
+                  "p99": null,
+                  "max": null
+                },
+                "itl_ms_p99": {
+                  "count": 0,
+                  "no_samples": true,
+                  "min": null,
+                  "mean": null,
+                  "p50": null,
+                  "p90": null,
+                  "p95": null,
+                  "p99": null,
+                  "max": null
+                }
+              }
+            }
+          },
+          "wall_distribution_s": {
+            "count": 3,
+            "no_samples": false,
+            "min": 3.113827561999642,
+            "mean": 3.1165222829998434,
+            "p50": 3.114246598999671,
+            "p90": 3.1200434702001076,
+            "p95": 3.120768079100162,
+            "p99": 3.1213477662202056,
+            "max": 3.1214926880002167
+          },
+          "output_tokens_per_s_distribution": {
+            "count": 3,
+            "no_samples": false,
+            "min": 30.754517019709045,
+            "mean": 30.803605290319307,
+            "p50": 30.826075247488824,
+            "p90": 30.82939393250581,
+            "p95": 30.829808768132935,
+            "p99": 30.83014063663463,
+            "max": 30.830223603760057
+          }
+        },
+        "mixed": {
+          "matched_trial_count": 3,
+          "requests": {
+            "decode": {
+              "request_count": 3,
+              "ttft_distribution_ms": {
+                "count": 3,
+                "no_samples": false,
+                "min": 342.44948100058537,
+                "mean": 342.6407623337582,
+                "p50": 342.66976000071736,
+                "p90": 342.7763888001209,
+                "p95": 342.78971740004636,
+                "p99": 342.8003802799867,
+                "max": 342.8030459999718
+              },
+              "pooled_event_gap_distribution_ms": {
+                "count": 285,
+                "no_samples": false,
+                "min": 29.09756400003971,
+                "mean": 79.5034536210503,
+                "p50": 95.120144998873,
+                "p90": 126.63416479990701,
+                "p95": 129.32414999959292,
+                "p99": 136.26047936042596,
+                "max": 138.4254789991246
+              },
+              "wall_distribution_s": {
+                "count": 3,
+                "no_samples": false,
+                "min": 7.715397988000404,
+                "mean": 7.895585410667384,
+                "p50": 7.750967722000496,
+                "p90": 8.1265059620011,
+                "p95": 8.173448242001177,
+                "p99": 8.211002066001237,
+                "max": 8.220390522001253
+              },
+              "output_tokens_per_s_distribution": {
+                "count": 3,
+                "no_samples": false,
+                "min": 11.678277296323486,
+                "mean": 12.168825979188652,
+                "p50": 12.38555022329815,
+                "p90": 12.431230379015085,
+                "p95": 12.436940398479702,
+                "p99": 12.441508414051397,
+                "max": 12.44265041794432
+              },
+              "server_reported_latency_distributions_ms": {
+                "ttft_ms": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 341.9,
+                  "mean": 342.06666666666666,
+                  "p50": 342.1,
+                  "p90": 342.18,
+                  "p95": 342.19,
+                  "p99": 342.198,
+                  "max": 342.2
+                },
+                "itl_ms_p50": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 77.9,
+                  "mean": 84.8,
+                  "p50": 81.2,
+                  "p90": 92.48,
+                  "p95": 93.89,
+                  "p99": 95.018,
+                  "max": 95.3
+                },
+                "itl_ms_p99": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 134.6,
+                  "mean": 135.5,
+                  "p50": 135.1,
+                  "p90": 136.46,
+                  "p95": 136.63,
+                  "p99": 136.76600000000002,
+                  "max": 136.8
+                }
+              }
+            },
+            "incoming": {
+              "request_count": 3,
+              "ttft_distribution_ms": {
+                "count": 3,
+                "no_samples": false,
+                "min": 6091.820270001335,
+                "mean": 6359.920396333716,
+                "p50": 6157.904013998632,
+                "p90": 6695.61032680067,
+                "p95": 6762.823615900925,
+                "p99": 6816.594247181129,
+                "max": 6830.03690500118
+              },
+              "pooled_event_gap_distribution_ms": {
+                "count": 45,
+                "no_samples": false,
+                "min": 40.442108000206645,
+                "mean": 40.59251653331254,
+                "p50": 40.57960399950389,
+                "p90": 40.68130339910567,
+                "p95": 40.70634679956129,
+                "p99": 40.920659160474315,
+                "max": 41.04835200087109
+              },
+              "wall_distribution_s": {
+                "count": 3,
+                "no_samples": false,
+                "min": 6.701050315001339,
+                "mean": 6.968926962666956,
+                "p50": 6.7662769649996335,
+                "p90": 7.304818279399842,
+                "p95": 7.372135943699869,
+                "p99": 7.4259900751398895,
+                "max": 7.439453607999894
+              },
+              "output_tokens_per_s_distribution": {
+                "count": 3,
+                "no_samples": false,
+                "min": 2.1506955810295882,
+                "mean": 2.301016394989969,
+                "p50": 2.364668204208053,
+                "p90": 2.3830819606274236,
+                "p95": 2.385383680179845,
+                "p99": 2.387225055821782,
+                "max": 2.3876853997322662
+              },
+              "server_reported_latency_distributions_ms": {
+                "ttft_ms": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 6089.5,
+                  "mean": 6357.466666666667,
+                  "p50": 6155.4,
+                  "p90": 6693.08,
+                  "p95": 6760.29,
+                  "p99": 6814.058,
+                  "max": 6827.5
+                },
+                "itl_ms_p50": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 40.5,
+                  "mean": 40.56666666666667,
+                  "p50": 40.6,
+                  "p90": 40.6,
+                  "p95": 40.6,
+                  "p99": 40.6,
+                  "max": 40.6
+                },
+                "itl_ms_p99": {
+                  "count": 3,
+                  "no_samples": false,
+                  "min": 40.6,
+                  "mean": 40.76666666666667,
+                  "p50": 40.7,
+                  "p90": 40.94,
+                  "p95": 40.97,
+                  "p99": 40.994,
+                  "max": 41.0
+                }
+              }
+            }
+          },
+          "wall_distribution_s": {
+            "count": 3,
+            "no_samples": false,
+            "min": 7.715397988000404,
+            "mean": 7.895585410667384,
+            "p50": 7.750967722000496,
+            "p90": 8.1265059620011,
+            "p95": 8.173448242001177,
+            "p99": 8.211002066001237,
+            "max": 8.220390522001253
+          },
+          "output_tokens_per_s_distribution": {
+            "count": 3,
+            "no_samples": false,
+            "min": 13.624656845710733,
+            "mean": 14.196963642386761,
+            "p50": 14.449808593847843,
+            "p90": 14.503102108850934,
+            "p95": 14.50976379822632,
+            "p99": 14.51509314972663,
+            "max": 14.516425487601706
+          },
+          "decode_phase_pooled_event_gaps_ms": {
+            "before": {
+              "count": 21,
+              "no_samples": false,
+              "min": 29.09756400003971,
+              "mean": 29.140944523792964,
+              "p50": 29.124475999196875,
+              "p90": 29.185387000325136,
+              "p95": 29.215458998805843,
+              "p99": 29.224227799568325,
+              "max": 29.226419999758946
+            },
+            "during": {
+              "count": 175,
+              "no_samples": false,
+              "min": 40.488269998604665,
+              "mean": 108.06320742857808,
+              "p50": 119.95174999901792,
+              "p90": 128.72320000024047,
+              "p95": 131.54542809897973,
+              "p99": 136.75790180055628,
+              "max": 138.4254789991246
+            },
+            "after": {
+              "count": 83,
+              "no_samples": false,
+              "min": 29.14403599970683,
+              "mean": 35.251982831305874,
+              "p50": 40.48863000025449,
+              "p90": 40.63247779959056,
+              "p95": 40.681100800247805,
+              "p99": 40.76408049961174,
+              "max": 41.0606130008091
+            },
+            "crossing": {
+              "count": 6,
+              "no_samples": false,
+              "min": 29.121814999598428,
+              "mean": 34.92476200002178,
+              "p50": 34.87167950061121,
+              "p90": 40.76956599965342,
+              "p95": 40.81742549988121,
+              "p99": 40.85571310006344,
+              "max": 40.865285000109
+            },
+            "unclassified": {
+              "count": 0,
+              "no_samples": true,
+              "min": null,
+              "mean": null,
+              "p50": null,
+              "p90": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          }
+        }
+      }
+    }
+  },
+  "correctness": {
+    "cross_build_exact": {
+      "greedy": {
+        "agreement": 1.0,
+        "exact": true,
+        "matches": 96,
+        "minimum_prompt_agreement": 1.0,
+        "passes_90_percent": true,
+        "per_prompt": [
+          {
+            "agreement": 1.0,
+            "exact": true,
+            "logit_bit_mismatch_steps": [],
+            "matches": 32,
+            "name": "coding_heap",
+            "passes_90_percent": true,
+            "sample_size": 32,
+            "token_mismatch_steps": []
+          },
+          {
+            "agreement": 1.0,
+            "exact": true,
+            "logit_bit_mismatch_steps": [],
+            "matches": 32,
+            "name": "reasoning_graph",
+            "passes_90_percent": true,
+            "sample_size": 32,
+            "token_mismatch_steps": []
+          },
+          {
+            "agreement": 1.0,
+            "exact": true,
+            "logit_bit_mismatch_steps": [],
+            "matches": 32,
+            "name": "coding_transactions",
+            "passes_90_percent": true,
+            "sample_size": 32,
+            "token_mismatch_steps": []
+          }
+        ],
+        "sample_size": 96
+      },
+      "teacher": {
+        "agreement": 1.0,
+        "exact": true,
+        "matches": 96,
+        "minimum_prompt_agreement": 1.0,
+        "passes_90_percent": true,
+        "per_prompt": [
+          {
+            "agreement": 1.0,
+            "exact": true,
+            "logit_bit_mismatch_steps": [],
+            "matches": 32,
+            "name": "coding_heap",
+            "passes_90_percent": true,
+            "sample_size": 32,
+            "token_mismatch_steps": []
+          },
+          {
+            "agreement": 1.0,
+            "exact": true,
+            "logit_bit_mismatch_steps": [],
+            "matches": 32,
+            "name": "reasoning_graph",
+            "passes_90_percent": true,
+            "sample_size": 32,
+            "token_mismatch_steps": []
+          },
+          {
+            "agreement": 1.0,
+            "exact": true,
+            "logit_bit_mismatch_steps": [],
+            "matches": 32,
+            "name": "coding_transactions",
+            "passes_90_percent": true,
+            "sample_size": 32,
+            "token_mismatch_steps": []
+          }
+        ],
+        "sample_size": 96
+      }
+    },
+    "paged_native": {
+      "status": "passed",
+      "case_count": 21,
+      "numerical_gate": [
+        {
+          "counters": {
+            "dpas": 0,
+            "generic": 0,
+            "grouped": 0,
+            "prefill": 0,
+            "prefill_scalar": 0,
+            "prefill_xmx": 0,
+            "sharded": 0,
+            "short": 0
+          },
+          "duration_seconds": 0.0025444519997108728,
+          "evidence": {
+            "gate_scope": "aggregate",
+            "legacy_per_prompt_pass": false,
+            "matches": 90,
+            "metric": "teacher-forced, not autoregressive exactness",
+            "minimum_prompt_agreement": 0.875,
+            "per_prompt": {
+              "coding_heap": 0.96875,
+              "coding_transactions": 0.96875,
+              "reasoning_graph": 0.875
+            },
+            "sample_size": 96,
+            "threshold": 0.9,
+            "top1_agreement": 0.9375
+          },
+          "flags": {
+            "LD_LIBRARY_PATH": "/opt/intel/oneapi/compiler/latest/lib:/opt/intel/oneapi/compiler/latest/opt/compiler/lib:/opt/intel/oneapi/umf/latest/lib:/opt/intel/oneapi/tbb/latest/lib",
+            "ONEAPI_DEVICE_SELECTOR": "level_zero:gpu",
+            "SYCL_DEVICE_FILTER": null,
+            "TQ_CTX": "2048",
+            "TQ_XPU_DEV": "0",
+            "TQ_XPU_K64": "gate,up,down",
+            "TQ_XPU_KV_PAGE": "256",
+            "TQ_XPU_KV_POOL_MB": null,
+            "TQ_XPU_KV_POOL_TOKENS": "1536",
+            "TQ_XPU_PAGED": "1",
+            "TQ_XPU_PAGED_KV": null,
+            "TQ_XPU_PREFILL_XMX": "1",
+            "TQ_XPU_SLOTS": "2",
+            "TQ_XPU_TP": "1",
+            "TQ_XPU_W4A4": null,
+            "ZE_AFFINITY_MASK": "1"
+          },
+          "name": "numeric_top1_gate",
+          "status": "passed"
+        }
+      ]
+    },
+    "flat_native": {
+      "status": "passed",
+      "case_count": 31
+    },
+    "http": {
+      "ok": true,
+      "failures": [],
+      "cases": [
+        {
+          "name": "simultaneous-1-8-9-16-17",
+          "ok": true
+        },
+        {
+          "name": "medium-packed-three-wave-apc",
+          "ok": true
+        },
+        {
+          "name": "raw-stream-exact-count",
+          "ok": true
+        },
+        {
+          "name": "streaming-split-stop",
+          "ok": true
+        },
+        {
+          "name": "structured-tool-marker-and-count",
+          "ok": true
+        },
+        {
+          "name": "disconnect-admitted",
+          "ok": true
+        },
+        {
+          "name": "disconnect-decode",
+          "ok": true
+        }
+      ]
+    },
+    "mixed_tier_gate_only": {
+      "greedy": {
+        "agreement": 1.0,
+        "exact": true,
+        "matches": 24,
+        "minimum_prompt_agreement": 1.0,
+        "passes_90_percent": true,
+        "per_prompt": [
+          {
+            "agreement": 1.0,
+            "exact": true,
+            "logit_bit_mismatch_steps": [],
+            "matches": 8,
+            "name": "coding_heap",
+            "passes_90_percent": true,
+            "sample_size": 8,
+            "token_mismatch_steps": []
+          },
+          {
+            "agreement": 1.0,
+            "exact": true,
+            "logit_bit_mismatch_steps": [],
+            "matches": 8,
+            "name": "reasoning_graph",
+            "passes_90_percent": true,
+            "sample_size": 8,
+            "token_mismatch_steps": []
+          },
+          {
+            "agreement": 1.0,
+            "exact": true,
+            "logit_bit_mismatch_steps": [],
+            "matches": 8,
+            "name": "coding_transactions",
+            "passes_90_percent": true,
+            "sample_size": 8,
+            "token_mismatch_steps": []
+          }
+        ],
+        "sample_size": 24
+      },
+      "teacher": {
+        "agreement": 1.0,
+        "exact": true,
+        "matches": 24,
+        "minimum_prompt_agreement": 1.0,
+        "passes_90_percent": true,
+        "per_prompt": [
+          {
+            "agreement": 1.0,
+            "exact": true,
+            "logit_bit_mismatch_steps": [],
+            "matches": 8,
+            "name": "coding_heap",
+            "passes_90_percent": true,
+            "sample_size": 8,
+            "token_mismatch_steps": []
+          },
+          {
+            "agreement": 1.0,
+            "exact": true,
+            "logit_bit_mismatch_steps": [],
+            "matches": 8,
+            "name": "reasoning_graph",
+            "passes_90_percent": true,
+            "sample_size": 8,
+            "token_mismatch_steps": []
+          },
+          {
+            "agreement": 1.0,
+            "exact": true,
+            "logit_bit_mismatch_steps": [],
+            "matches": 8,
+            "name": "coding_transactions",
+            "passes_90_percent": true,
+            "sample_size": 8,
+            "token_mismatch_steps": []
+          }
+        ],
+        "sample_size": 24
+      }
+    },
+    "release_http_smoke": {
+      "status": "passed",
+      "requests": 6,
+      "generated_tokens_each": 16,
+      "cold_warm_text_exact": true,
+      "warm_reused_tokens": [
+        768,
+        768
+      ],
+      "prefill_width_hist": {
+        "2": 51
+      },
+      "decode_width_hist": {
+        "2": 69
+      },
+      "prefill_slice_ms": 0
+    },
+    "eight_way_execution": {
+      "request_count": 8,
+      "prefill_width8_delta": 28,
+      "decode_width8_delta": 20
+    }
+  },
+  "rejected": {
+    "rc32": {
+      "reason": "No consistent full-model improvement over RC16; slightly better short prompts but slower 8k/16k. Removed from production source.",
+      "prefill": {
+        "cases": [
+          {
+            "calls": 1,
+            "chunk_tokens": 512,
+            "consumed_tokens": 512,
+            "mode": "chunked_prefill",
+            "planned_calls": 1,
+            "prompt_tokens": 512,
+            "seconds": 0.6480328420002479,
+            "seconds_per_token": 0.0012656891445317342,
+            "speedup_vs_loop": null,
+            "status": "passed",
+            "tokens_per_second": 790.0834137042149
+          },
+          {
+            "calls": 1,
+            "chunk_tokens": 512,
+            "consumed_tokens": 512,
+            "mode": "chunked_prefill",
+            "planned_calls": 1,
+            "prompt_tokens": 512,
+            "seconds": 0.6383377539987123,
+            "seconds_per_token": 0.001246753425778735,
+            "speedup_vs_loop": null,
+            "status": "passed",
+            "tokens_per_second": 802.0832181595088
+          },
+          {
+            "calls": 4,
+            "chunk_tokens": 512,
+            "consumed_tokens": 2048,
+            "mode": "chunked_prefill",
+            "planned_calls": 4,
+            "prompt_tokens": 2048,
+            "seconds": 2.768896950999988,
+            "seconds_per_token": 0.0013520004643554628,
+            "speedup_vs_loop": null,
+            "status": "passed",
+            "tokens_per_second": 739.6447163771711
+          },
+          {
+            "calls": 4,
+            "chunk_tokens": 512,
+            "consumed_tokens": 2048,
+            "mode": "chunked_prefill",
+            "planned_calls": 4,
+            "prompt_tokens": 2048,
+            "seconds": 2.7663201770010346,
+            "seconds_per_token": 0.0013507422739262864,
+            "speedup_vs_loop": null,
+            "status": "passed",
+            "tokens_per_second": 740.3336811938505
+          },
+          {
+            "calls": 16,
+            "chunk_tokens": 512,
+            "consumed_tokens": 8192,
+            "mode": "chunked_prefill",
+            "planned_calls": 16,
+            "prompt_tokens": 8192,
+            "seconds": 14.420636371,
+            "seconds_per_token": 0.001760331588256836,
+            "speedup_vs_loop": null,
+            "status": "passed",
+            "tokens_per_second": 568.0747915171183
+          },
+          {
+            "calls": 16,
+            "chunk_tokens": 512,
+            "consumed_tokens": 8192,
+            "mode": "chunked_prefill",
+            "planned_calls": 16,
+            "prompt_tokens": 8192,
+            "seconds": 14.41154942600042,
+            "seconds_per_token": 0.0017592223420410669,
+            "speedup_vs_loop": null,
+            "status": "passed",
+            "tokens_per_second": 568.4329809271239
+          },
+          {
+            "calls": 32,
+            "chunk_tokens": 512,
+            "consumed_tokens": 16384,
+            "mode": "chunked_prefill",
+            "planned_calls": 32,
+            "prompt_tokens": 16384,
+            "seconds": 37.618841412999245,
+            "seconds_per_token": 0.0022960718635863797,
+            "speedup_vs_loop": null,
+            "status": "passed",
+            "tokens_per_second": 435.5264379391143
+          }
+        ],
+        "configuration": {
+          "chunk": 512,
+          "contexts": [
+            512,
+            512,
+            2048,
+            2048,
+            8192,
+            8192,
+            16384
+          ],
+          "loop_ref": 0
+        },
+        "library": {
+          "bytes": 1341192,
+          "device": 66306,
+          "inode": 23631049,
+          "mtime_ns": 1788896640863143090,
+          "path": "xpu/build/optimization-20260908-142035/librc32-experiment.so",
+          "sha256": "bbb3a85114b8929fca9a08b80975660bd655f6851baa63cfaf5d0f7b60db8769"
+        },
+        "library_path": "xpu/build/optimization-20260908-142035/librc32-experiment.so",
+        "model_path": "$TQF",
+        "pid": 73446,
+        "prompt_construction": "repeat template and truncate to requested tokens",
+        "prompt_template": [
+          151644,
+          872,
+          198,
+          9707,
+          11,
+          1246,
+          525,
+          498,
+          30,
+          151645,
+          198
+        ],
+        "schema": "bench_prefill/v1",
+        "status": "passed",
+        "timing_scope": "reset excluded; prompt construction excluded; chunk ctypes array construction included; native calls included",
+        "tq_env": {
+          "TQ_CTX": "16384",
+          "TQ_XPU_DEV": "0",
+          "TQ_XPU_K64": "gate,up,down",
+          "TQ_XPU_KV_PAGE": "128",
+          "TQ_XPU_KV_POOL_TOKENS": "16384",
+          "TQ_XPU_PAGED": "1",
+          "TQ_XPU_PREFILL_XMX": "auto",
+          "TQ_XPU_SLOTS": "2",
+          "TQ_XPU_TP": "1"
+        }
+      },
+      "cross_build_exact": {
+        "greedy": {
+          "agreement": 1.0,
+          "exact": true,
+          "matches": 96,
+          "minimum_prompt_agreement": 1.0,
+          "passes_90_percent": true,
+          "per_prompt": [
+            {
+              "agreement": 1.0,
+              "exact": true,
+              "logit_bit_mismatch_steps": [],
+              "matches": 32,
+              "name": "coding_heap",
+              "passes_90_percent": true,
+              "sample_size": 32,
+              "token_mismatch_steps": []
+            },
+            {
+              "agreement": 1.0,
+              "exact": true,
+              "logit_bit_mismatch_steps": [],
+              "matches": 32,
+              "name": "reasoning_graph",
+              "passes_90_percent": true,
+              "sample_size": 32,
+              "token_mismatch_steps": []
+            },
+            {
+              "agreement": 1.0,
+              "exact": true,
+              "logit_bit_mismatch_steps": [],
+              "matches": 32,
+              "name": "coding_transactions",
+              "passes_90_percent": true,
+              "sample_size": 32,
+              "token_mismatch_steps": []
+            }
+          ],
+          "sample_size": 96
+        },
+        "teacher": {
+          "agreement": 1.0,
+          "exact": true,
+          "matches": 96,
+          "minimum_prompt_agreement": 1.0,
+          "passes_90_percent": true,
+          "per_prompt": [
+            {
+              "agreement": 1.0,
+              "exact": true,
+              "logit_bit_mismatch_steps": [],
+              "matches": 32,
+              "name": "coding_heap",
+              "passes_90_percent": true,
+              "sample_size": 32,
+              "token_mismatch_steps": []
+            },
+            {
+              "agreement": 1.0,
+              "exact": true,
+              "logit_bit_mismatch_steps": [],
+              "matches": 32,
+              "name": "reasoning_graph",
+              "passes_90_percent": true,
+              "sample_size": 32,
+              "token_mismatch_steps": []
+            },
+            {
+              "agreement": 1.0,
+              "exact": true,
+              "logit_bit_mismatch_steps": [],
+              "matches": 32,
+              "name": "coding_transactions",
+              "passes_90_percent": true,
+              "sample_size": 32,
+              "token_mismatch_steps": []
+            }
+          ],
+          "sample_size": 96
+        }
+      }
+    },
+    "parallel_gdn": {
+      "reason": "Faster microkernel failed unchanged >=90% aggregate model gate; not shipped.",
+      "status": "failed",
+      "error": "AssertionError: teacher-forced aggregate top1 agreement below 90%: {'coding_heap': 1.0, 'reasoning_graph': 0.84375, 'coding_transactions': 0.75}; aggregate=83/96=0.864583"
+    },
+    "attention": {
+      "reason": "Smaller workgroups, page-lookup broadcasts, cached Q decomposition and shared K staging did not improve retained workloads consistently; original attention restored."
+    },
+    "scheduler_quantum16": {
+      "reason": "Worse incoming TTFT and pair completion than 8-row rounding; removed."
+    }
+  },
+  "limits": [
+    "Native prefill excludes final norm/lm_head and HTTP overhead; it is not TTFT.",
+    "Two native samples at512/2048/8192, one at16384; not a statistical performance guarantee.",
+    "Exact cross-build evidence covers the recorded prompts and continuations, not all inputs.",
+    "XMX versus scalar policy remains aggregate >=90%, not bit identity.",
+    "Client SSE event gaps and server ITL are distinct metrics.",
+    "No new75k full-model measurements, hardware ceiling claim, or vendor head-to-head comparison.",
+    "Raw logs, rejected source snapshots and binaries are local in the ignored campaign directory; this summary preserves selected measurements and invocations.",
+    "Legacy *-exit.json seconds values include delayed collection and are not workload runtime."
+  ],
+  "clean_release": {
+    "library_sha256": "508c9cbc8ed72e16d7dafff550d49b3a874de637e2557867fbe7aeab07eb7685",
+    "identical_to_measured_binary": true,
+    "source_sha256": {
+      "xpu/src/decode.cpp": "8e116ee3a1a90187a5faf076b4ccd5679ce72702daec789e4ea1133635a50d21",
+      "xpu/src/prefill_xmx.hpp": "e1c3610b02363dd6208f62d7e9f7ee7f4273e51a9fcc8bfcc1280eebe880784c",
+      "xpu/src/tqf_loader.cpp": "099e62783b5ba0dacd8a4cedfeffca39117021b2343373d9805fe16a728e2470",
+      "xpu/src/tq_common.hpp": "a34e0fcd580bcca22692c1af35ced63121197ea9740ae890260e76ae12f890ca",
+      "xpu/src/kernels_dpas.cpp": "a79ea1daedf19aa587c01f0fe8e95fbde786c00105c722d26153b5b8a29b5523",
+      "xpu/src/kernels_core.cpp": "ee9c80db61b2c3b774c92347ae95905ab26e8c056c5f81a175397eb8e2b3dd39",
+      "xpu/src/kernels_seq.cpp": "0a427190dbf14a28e6cbfa7521ee94d37f8a4d482b2079dc6add276bbd2d1ba4",
+      "xpu/src/kernels_prefill.cpp": "5cc3acb1bbcf414e4b2d88279e8254a0f6ab423649f4722b6546d8052f505c5a"
+    },
+    "build_command": [
+      "/opt/intel/oneapi/compiler/latest/bin/icpx",
+      "-fsycl",
+      "-O2",
+      "-fPIC",
+      "-std=c++17",
+      "-Ixpu/src",
+      "-shared",
+      "-o",
+      "xpu/build/optimization-20260908-142035/librelease.so",
+      "xpu/src/decode.cpp",
+      "xpu/src/tqf_loader.cpp",
+      "xpu/src/kernels_core.cpp",
+      "xpu/src/kernels_seq.cpp",
+      "xpu/src/kernels_dpas.cpp",
+      "xpu/src/kernels_prefill.cpp"
+    ],
+    "build_exit": 0
+  }
+}

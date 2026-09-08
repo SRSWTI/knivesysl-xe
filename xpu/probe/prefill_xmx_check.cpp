@@ -1,6 +1,6 @@
 // Real-kernel scalar/XMX comparison and fragmented flat/paged equality gate.
 // Build against the candidate shared library with icpx -fsycl -O2 -Ixpu/src.
-// Arguments: prefix positions, query rows, page size, timed repeats.
+// Arguments: prefix positions, query rows, page size, timed repeats, warmups.
 #include "tq_common.hpp"
 #include <algorithm>
 #include <chrono>
@@ -26,8 +26,9 @@ int main(int argc, char **argv) {
     const int count = argc>2 ? std::atoi(argv[2]) : 24;
     const int page = argc>3 ? std::atoi(argv[3]) : 128;
     const int repeats = argc>4 ? std::atoi(argv[4]) : 3;
+    const int warmups = argc>5 ? std::atoi(argv[5]) : 3;
     if (pos<0 || pos>262144 || count<1 || count>4096 ||
-        (page!=128 && page!=256) || repeats<1 || repeats>100) return 2;
+        (page!=128 && page!=256) || repeats<1 || repeats>100 || warmups<1 || warmups>100) return 2;
     const int nh=24,nkv=4,hd=256,total=pos+count,blocks=(total+page-1)/page,padded=blocks*page;
     Buffers buffers; std::mt19937 rng(391);
     std::uniform_real_distribution<float> random(-1.0f,1.0f);
@@ -43,7 +44,7 @@ int main(int argc, char **argv) {
     auto run = [&](const char *selector, tq_kv_layout_t layout) {
         setenv("TQ_XPU_PREFILL_XMX", selector,1);
         auto launch=[&] { x_prefill_attn(out,dq,dn,dk,dv,dks,dvs,pos,count,nh,nkv,hd,1e-6f,10000000.0f,0.25f,layout); tq_q().wait_and_throw(); };
-        launch();
+        for (int r=0;r<warmups;++r) launch();
         auto start=std::chrono::steady_clock::now(); for(int r=0;r<repeats;++r) launch();
         double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()/repeats;
         std::vector<float> result(zeros.size()); tq_d2h(result.data(),out,result.size()*4); return std::make_pair(ms,result);
@@ -94,7 +95,7 @@ int main(int argc, char **argv) {
             std::memset(requests,0,sizeof(requests));
             tq_q().wait_and_throw();
         };
-        launch();
+        for (int r=0;r<warmups;++r) launch();
         auto start=std::chrono::steady_clock::now();
         for(int r=0;r<repeats;++r) launch();
         const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count()/repeats;
@@ -114,6 +115,7 @@ int main(int argc, char **argv) {
     std::cout << "{\"status\":\"" << (pass?"PASS":"FAIL") << "\",\"pos\":"<<pos<<",\"queries\":"<<count<<",\"page\":"<<page<<",\"cosine\":"<<cosine<<",\"relative_l2\":"<<relative<<",\"max_error\":"<<maxerr<<",\"max_reference\":"<<maxref<<",\"flat_paged_exact\":"<<(exact?"true":"false")<<",\"scalar_ms\":"<<reference.first<<",\"xmx_ms\":"<<matrix.first<<",\"paged_xmx_ms\":"<<paged.first<<",\"speedup\":"<<reference.first/matrix.first<<",\"xmx_calls\":"<<counters[6]<<",\"scalar_calls\":"<<counters[7]
               <<",\"auto_path\":\""<<(auto_xmx?"xmx":"scalar")<<"\",\"auto_exact\":"<<(auto_exact?"true":"false")<<",\"auto_ms\":"<<automatic.first
               <<",\"packed_exact\":"<<(packed_exact?"true":"false")<<",\"packed_ms\":"<<packed_ms<<",\"serial_pair_ms\":"<<paged.first+second_matrix.first
-              <<",\"packed_auto_path\":\""<<(packed_auto_xmx?"xmx":"scalar")<<"\",\"packed_auto_ms\":"<<packed_auto_ms<<"}"<<std::endl;
+              <<",\"packed_auto_path\":\""<<(packed_auto_xmx?"xmx":"scalar")<<"\",\"packed_auto_ms\":"<<packed_auto_ms
+              <<",\"repeats\":"<<repeats<<",\"warmups\":"<<warmups<<"}"<<std::endl;
     return pass?0:1;
 }

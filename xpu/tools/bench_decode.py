@@ -32,6 +32,8 @@ def main():
     parser.add_argument("--lib", required=True)
     parser.add_argument("--tqf", required=True)
     parser.add_argument("--model-dir", required=True)
+    parser.add_argument("--corpus", default=CORPUS,
+                        help="pinned text corpus used for identical teacher-forced inputs")
     parser.add_argument("--prompt-tokens", type=int, default=128)
     parser.add_argument("--warmup", type=int, default=16)
     parser.add_argument("--steps", type=int, default=512)
@@ -44,7 +46,7 @@ def main():
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir, trust_remote_code=True)
-    with open(CORPUS) as corpus_file:
+    with open(os.path.expanduser(args.corpus)) as corpus_file:
         tokens = tokenizer(corpus_file.read(), add_special_tokens=False).input_ids
     required = args.prompt_tokens + args.warmup + args.steps
     if len(tokens) < required:

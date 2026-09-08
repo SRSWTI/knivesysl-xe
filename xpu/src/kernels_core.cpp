@@ -242,11 +242,13 @@ int x_gemv_qmma_add(const tq_qmma_weight_t *w, const float *d_x,
     return ret;
 }
 
-int x_gemv_qmma_prepared(const tq_qmma_weight_t *w, const float *d_x, float *d_y) {
+int x_gemv_qmma_prepared(const tq_qmma_weight_t *w, const float *d_x, float *d_y,
+                         const float *d_residual) {
     if (!w || !d_x || !d_y) return -1;
-    if (w->s8_ready) return x_gemv_w8a8_prepared(w, d_y);
-    if (w->s4_ready) return x_gemv_w4a8_prepared(w, d_y);
-    return x_gemv_qmma(w, d_x, d_y);
+    if (w->s8_ready) return x_gemv_w8a8_prepared(w, d_y, d_residual);
+    if (w->s4_ready) return x_gemv_w4a8_prepared(w, d_y, d_residual);
+    return d_residual ? x_gemv_qmma_add(w, d_x, d_residual, d_y)
+                      : x_gemv_qmma(w, d_x, d_y);
 }
 
 void x_silu_mul(float *d_out, const float *d_gate, const float *d_up, int N) {
@@ -368,7 +370,7 @@ void x_argmax(const float *d_logits, int V, float *d_vals, int *d_ids,
     // CUDA src/forward_qwen.cu:16678-16680 plus its following host readback:
     // the in-order queue completes both stages before these copies, and the wait
     // is mandatory because the caller consumes the host pair immediately.
-    tq_d2h(out_id, d_ids + TQ_ARGMAX_BLOCKS, sizeof(*out_id));
-    tq_d2h(out_logit, d_vals + TQ_ARGMAX_BLOCKS, sizeof(*out_logit));
+    tq_q().memcpy(out_id, d_ids + TQ_ARGMAX_BLOCKS, sizeof(*out_id));
+    tq_q().memcpy(out_logit, d_vals + TQ_ARGMAX_BLOCKS, sizeof(*out_logit));
     tq_q().wait_and_throw();
 }

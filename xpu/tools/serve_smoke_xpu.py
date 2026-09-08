@@ -67,10 +67,10 @@ RESPONSE_PLAN_FIELDS = (
     "attention_config", "attention_branch_counts", "tier", "apc_enabled",
     "k64", "greedy",
 )
-ATTENTION_CONFIG_KEYS = ("simd16", "grouped", "dpas")
+ATTENTION_CONFIG_KEYS = ("simd16", "grouped", "dpas", "prefill_xmx")
 ATTENTION_BRANCH_KEYS = (
     "prefill", "simd16_short", "simd16_sharded", "simd16_grouped",
-    "generic", "simd16_dpas",
+    "generic", "simd16_dpas", "prefill_xmx", "prefill_scalar",
 )
 
 
@@ -235,8 +235,11 @@ def effective_metadata_issues(metadata):
         issues.append(
             "attention_config keys are not exactly " +
             ",".join(ATTENTION_CONFIG_KEYS))
-    elif any(type(config[key]) is not bool for key in ATTENTION_CONFIG_KEYS):
-        issues.append("attention_config values are not booleans")
+    else:
+        if any(type(config[key]) is not bool for key in ("simd16", "grouped", "dpas")):
+            issues.append("decode attention_config values are not booleans")
+        if config["prefill_xmx"] not in ("auto", "0", "1"):
+            issues.append("attention_config prefill_xmx is not auto, 0, or 1")
     counts = metadata.get("attention_branch_counts")
     if not isinstance(counts, dict):
         issues.append("attention_branch_counts is not an object")

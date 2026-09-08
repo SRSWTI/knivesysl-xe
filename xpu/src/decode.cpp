@@ -244,9 +244,17 @@ static int run_mlp_from_resid(tq_layer_t *l) {
         profile_projection(&l->mlp_gate);
         profile_projection(&l->mlp_up);
     }
-    x_silu_mul(m->d_mlp_hidden, m->d_gate, m->d_up, m->I);
+    const bool prepared_down = (l->mlp_down.s8_ready || l->mlp_down.s4_ready) &&
+                               l->mlp_down.K == m->I && m->I > 0 && (m->I % 32) == 0;
+    if (prepared_down)
+        x_silu_mul_quant(m->d_mlp_hidden, m->d_gate, m->d_up, m->I);
+    else
+        x_silu_mul(m->d_mlp_hidden, m->d_gate, m->d_up, m->I);
     profile_mark(kProfileActivation);
-    ret = x_gemv_qmma_add(&l->mlp_down, m->d_mlp_hidden,
+    ret = prepared_down
+        ? x_gemv_qmma_prepared(&l->mlp_down, m->d_mlp_hidden,
+                               m->d_layer_out, m->d_resid)
+        : x_gemv_qmma_add(&l->mlp_down, m->d_mlp_hidden,
                           m->d_resid, m->d_layer_out);
     profile_projection(&l->mlp_down);
     if (ret != 0) return -9;
@@ -1760,13 +1768,26 @@ int pf_ensure(int T) {
     return 0;
 }
 
-// Stage T rows of `src` (row length K) into the active A layouts. Under the
-// hybrid W4A4 tier both stagings run (a k64-selected weight takes the s4
-// path, everything else stays W4A8); the double quant costs ~1/17000th of
-// the GEMMs it feeds.
-void pf_stage(const float *src, int K, int T) {
-    x_quantize_act_chunk(src, K, T, g_pf.aq, g_pf.as, g_pf.asum);
-    if (g_pf.w4a4)
+// Stage only the layouts consumed by this projection fan-out. Mixed selectors
+// still prepare both tiers, using the same per-weight predicate as pf_gemm.
+bool pf_uses_s4(const tq_qmma_weight_t *w) {
+    return g_pf.w4a4 && w->s4_k64;
+}
+
+void pf_stage(const float *src, int K, int T, const tq_qmma_weight_t *w0,
+              const tq_qmma_weight_t *w1 = nullptr,
+              const tq_qmma_weight_t *w2 = nullptr,
+              const tq_qmma_weight_t *w3 = nullptr) {
+    const tq_qmma_weight_t *weights[] = {w0, w1, w2, w3};
+    bool need_s8 = false, need_s4 = false;
+    for (const auto *w : weights) {
+        if (!w) continue;
+        if (pf_uses_s4(w)) need_s4 = true;
+        else need_s8 = true;
+    }
+    if (need_s8)
+        x_quantize_act_chunk(src, K, T, g_pf.aq, g_pf.as, g_pf.asum);
+    if (need_s4)
         x_quantize_act_chunk_s4(src, K, T, g_pf.aq4, g_pf.as4, g_pf.asum4);
 }
 
@@ -1779,7 +1800,7 @@ struct pf_segments {
 
 int pf_gemm(const tq_qmma_weight_t *w, float *dst, int T,
              const pf_segments *batch = nullptr) {
-    if (g_pf.w4a4 && w->s4_k64)
+    if (pf_uses_s4(w))
         return x_gemm_w4a4(w, g_pf.aq4, g_pf.as4, g_pf.asum4, dst, T);
     return x_gemm_w4a8(w, g_pf.aq, g_pf.as, g_pf.asum, dst, T,
                        batch ? batch->offsets : nullptr, batch ? batch->n : 0);
@@ -1831,13 +1852,13 @@ bool pf_layers_any_k64(void) {
 int pf_mlp(tq_layer_t *l, int T, const pf_segments *batch = nullptr) {
     tq_model_t *m = &g_qwen;
     x_rmsnorm_chunk(g_pf.normed, g_pf.resid, l->d_post_ln, m->H, T, m->eps);
-    pf_stage(g_pf.normed, m->H, T);
+    pf_stage(g_pf.normed, m->H, T, &l->mlp_gate, &l->mlp_up);
     profile_mark(kProfileNorm);
     if (pf_gemm(&l->mlp_gate, g_pf.gate, T, batch) != 0) return -1;
     if (pf_gemm(&l->mlp_up, g_pf.up, T, batch) != 0) return -2;
     x_silu_mul(g_pf.hidden, g_pf.gate, g_pf.up, T * m->I);
     profile_mark(kProfileProjection);
-    pf_stage(g_pf.hidden, m->I, T);
+    pf_stage(g_pf.hidden, m->I, T, &l->mlp_down);
     profile_mark(kProfileActivation);
     if (pf_gemm(&l->mlp_down, g_pf.layer_out, T, batch) != 0) return -3;
     x_add_inplace(g_pf.layer_out, g_pf.resid, T * m->H);
@@ -1852,7 +1873,7 @@ int pf_full_layer(int layer, int pos0, int T, const pf_segments *batch = nullptr
     const int kv_w = m->nkv * m->hd;
     const int core_w = m->nh * m->hd;
     x_rmsnorm_chunk(g_pf.normed, g_pf.x, l->d_input_ln, m->H, T, m->eps);
-    pf_stage(g_pf.normed, m->H, T);
+    pf_stage(g_pf.normed, m->H, T, &l->q_proj, &l->k_proj, &l->v_proj);
     profile_mark(kProfileNorm);
     if (pf_gemm(&l->q_proj, g_pf.qkv, T, batch) != 0) return -1;
     if (pf_gemm(&l->k_proj, g_pf.b, T, batch) != 0) return -2;
@@ -1890,7 +1911,7 @@ int pf_full_layer(int layer, int pos0, int T, const pf_segments *batch = nullptr
                        m->rope_theta, m->partial_rotary_factor, r.layout);
     }
     profile_mark(kProfileAttention);
-    pf_stage(g_pf.core, core_w, T);
+    pf_stage(g_pf.core, core_w, T, &l->o_proj);
     if (pf_gemm(&l->o_proj, g_pf.resid, T, batch) != 0) return -4;
     profile_mark(kProfileProjection);
     x_add_inplace(g_pf.resid, g_pf.x, T * m->H);
@@ -1964,7 +1985,8 @@ int pf_linear_layer(int layer, int T, const pf_segments *batch = nullptr) {
     const int dim = m->linear_value_head_dim;
     const int value_dim = heads * dim;
     x_rmsnorm_chunk(g_pf.normed, g_pf.x, l->d_input_ln, m->H, T, m->eps);
-    pf_stage(g_pf.normed, m->H, T);
+    pf_stage(g_pf.normed, m->H, T, &l->linear_in_qkv, &l->linear_in_z,
+              &l->linear_in_b, &l->linear_in_a);
     profile_mark(kProfileNorm);
     if (pf_gemm(&l->linear_in_qkv, g_pf.qkv, T, batch) != 0) return -1;
     if (pf_gemm(&l->linear_in_z, g_pf.z, T, batch) != 0) return -2;
@@ -1979,7 +2001,7 @@ int pf_linear_layer(int layer, int T, const pf_segments *batch = nullptr) {
                               !batch && g_wave.capture) != 0) return -7;
     }
     profile_mark(kProfileDelta);
-    pf_stage(g_pf.core, value_dim, T);
+    pf_stage(g_pf.core, value_dim, T, &l->linear_out);
     if (pf_gemm(&l->linear_out, g_pf.resid, T, batch) != 0) return -5;
     profile_mark(kProfileProjection);
     x_add_inplace(g_pf.resid, g_pf.x, T * m->H);
@@ -2080,8 +2102,10 @@ extern "C" int qwn_prefill_batch(const int *slots, const int *tokens,
             for (int layer = 0; layer < m->L; ++layer) {
                 if (m->layer_types[layer] != TQ_LAYER_LINEAR_ATTENTION) continue;
                 tq_layer_t *l = &m->layers[layer];
-                tq_dev_zero(slot_conv_at(l, slots[i]), slot_conv_elems() * sizeof(float));
-                tq_dev_zero(slot_recur_at(l, slots[i]), slot_recur_elems() * sizeof(float));
+                tq_q().memset(slot_conv_at(l, slots[i]), 0,
+                              slot_conv_elems() * sizeof(float));
+                tq_q().memset(slot_recur_at(l, slots[i]), 0,
+                              slot_recur_elems() * sizeof(float));
             }
         }
         const char *w4a4_env = getenv("TQ_XPU_W4A4");
@@ -2720,13 +2744,13 @@ extern "C" int qwn_decode_batch(const int *slots, const int *tokens,
     for (int i = 0; i < n; ++i)
         x_embed_lookup(g_pf.x + (size_t)i * m->H, m->d_embed, tokens[i], m->H);
     if (n < Tp)   // deterministic pad rows (zero in, finite through)
-        tq_dev_zero(g_pf.x + (size_t)n * m->H,
-                    (size_t)(Tp - n) * m->H * sizeof(float));
+        tq_q().memset(g_pf.x + (size_t)n * m->H, 0,
+                      (size_t)(Tp - n) * m->H * sizeof(float));
     for (int layer = 0; layer < m->L; ++layer) {
         tq_layer_t *l = &m->layers[layer];
         x_rmsnorm_chunk(g_pf.normed, g_pf.x, l->d_input_ln, m->H, Tp, m->eps);
-        pf_stage(g_pf.normed, m->H, Tp);
         if (m->layer_types[layer] == TQ_LAYER_FULL_ATTENTION) {
+            pf_stage(g_pf.normed, m->H, Tp, &l->q_proj, &l->k_proj, &l->v_proj);
             if (pf_gemm(&l->q_proj, g_pf.qkv, Tp) != 0) return -7;
             if (pf_gemm(&l->k_proj, g_pf.b, Tp) != 0) return -7;
             if (pf_gemm(&l->v_proj, g_pf.z, Tp) != 0) return -7;
@@ -2745,11 +2769,13 @@ extern "C" int qwn_decode_batch(const int *slots, const int *tokens,
                                    m->partial_rotary_factor, m->max_seq,
                                    tq_pool_layout(slots[i]));
             if (n < Tp)
-                tq_dev_zero(g_pf.core + (size_t)n * core_w,
-                            (size_t)(Tp - n) * core_w * sizeof(float));
-            pf_stage(g_pf.core, core_w, Tp);
+                tq_q().memset(g_pf.core + (size_t)n * core_w, 0,
+                              (size_t)(Tp - n) * core_w * sizeof(float));
+            pf_stage(g_pf.core, core_w, Tp, &l->o_proj);
             if (pf_gemm(&l->o_proj, g_pf.resid, Tp) != 0) return -7;
         } else if (m->layer_types[layer] == TQ_LAYER_LINEAR_ATTENTION) {
+            pf_stage(g_pf.normed, m->H, Tp, &l->linear_in_qkv, &l->linear_in_z,
+                      &l->linear_in_b, &l->linear_in_a);
             if (pf_gemm(&l->linear_in_qkv, g_pf.qkv, Tp) != 0) return -7;
             if (pf_gemm(&l->linear_in_z, g_pf.z, Tp) != 0) return -7;
             if (pf_gemm(&l->linear_in_b, g_pf.b, Tp) != 0) return -7;
@@ -2770,9 +2796,9 @@ extern "C" int qwn_decode_batch(const int *slots, const int *tokens,
                                            heads, dim, m->eps);
             }
             if (n < Tp)
-                tq_dev_zero(g_pf.core + (size_t)n * value_dim,
-                            (size_t)(Tp - n) * value_dim * sizeof(float));
-            pf_stage(g_pf.core, value_dim, Tp);
+                tq_q().memset(g_pf.core + (size_t)n * value_dim, 0,
+                              (size_t)(Tp - n) * value_dim * sizeof(float));
+            pf_stage(g_pf.core, value_dim, Tp, &l->linear_out);
             if (pf_gemm(&l->linear_out, g_pf.resid, Tp) != 0) return -7;
         } else {
             return -7;

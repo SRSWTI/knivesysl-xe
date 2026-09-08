@@ -305,6 +305,21 @@ void x_linear_conv_chunk(float *d_out, float *d_state, const float *d_x,
 // the spec wave's rewind (design 9.3) after restoring the state snapshot.
 void x_linear_conv_advance(float *d_state, const float *d_x, int conv_dim,
                            int ks, int T) {
+    if (T < ks) {
+        // A tap can read another tap of the incoming state. One owner per
+        // channel shifts in ascending order, before the source is overwritten.
+        tq_q().parallel_for(sycl::range<1>((size_t)conv_dim),
+                            [=](sycl::id<1> id) {
+            const int channel = (int)id[0];
+            float *state = d_state + (size_t)channel * ks;
+            for (int tap = 0; tap < ks; ++tap) {
+                const int idx = T - ks + tap;
+                state[tap] = (idx >= 0) ? d_x[(size_t)idx * conv_dim + channel]
+                                        : state[tap + T];
+            }
+        });
+        return;
+    }
     tq_q().parallel_for(sycl::range<1>((size_t)conv_dim * ks),
                         [=](sycl::id<1> id) {
         const int channel = (int)(id[0] / ks);
@@ -355,6 +370,8 @@ int x_deltanet_chunk(float *d_core_out, float *d_recurrent,
         sycl::local_accessor<float, 1> Lmat(sycl::range<1>(CK * CK), cgh);
         sycl::local_accessor<float, 1> Amat(sycl::range<1>(CK * CK), cgh);
         sycl::local_accessor<float, 1> la_sh(sycl::range<1>(CK), cgh);
+        sycl::local_accessor<float, 1> gamma_sh(sycl::range<1>(CK), cgh);
+        sycl::local_accessor<float, 1> tail_decay_sh(sycl::range<1>(CK), cgh);
         sycl::local_accessor<float, 1> beta_sh(sycl::range<1>(CK), cgh);
         sycl::local_accessor<float, 1> qfac(sycl::range<1>(CK), cgh);
         sycl::local_accessor<float, 1> kfac(sycl::range<1>(CK), cgh);
@@ -393,21 +410,14 @@ int x_deltanet_chunk(float *d_core_out, float *d_recurrent,
                         qfac[tid] = sycl::rsqrt(qss + 1.0e-6f) *
                                     sycl::rsqrt((float)D);
                         kfac[tid] = sycl::rsqrt(kss + 1.0e-6f);
-                    }
-                    if (tid == 0) {
-                        float cum = 0.0f;
-                        for (int j = 0; j < L; ++j) {
-                            const int t = s + j;
-                            const float bb = d_b[(size_t)t * nv + head];
-                            const float sp_arg =
-                                d_a[(size_t)t * nv + head] + dtb;
-                            const float sp =
-                                sycl::log1p(sycl::exp(-sycl::fabs(sp_arg))) +
-                                sycl::fmax(sp_arg, 0.0f);
-                            cum += -sycl::exp(Alog) * sp;
-                            beta_sh[j] = 1.0f / (1.0f + sycl::exp(-bb));
-                            la_sh[j] = cum;
-                        }
+                        const float bb = d_b[(size_t)t * nv + head];
+                        const float sp_arg = d_a[(size_t)t * nv + head] + dtb;
+                        const float sp =
+                            sycl::log1p(sycl::exp(-sycl::fabs(sp_arg))) +
+                            sycl::fmax(sp_arg, 0.0f);
+                        beta_sh[tid] = 1.0f / (1.0f + sycl::exp(-bb));
+                        // Temporarily hold softplus until the serial prefix.
+                        la_sh[tid] = sp;
                     }
                     item.barrier(sycl::access::fence_space::local_space);
                     // 1b: one element per thread (CK*D == D*G at CK == G).
@@ -418,21 +428,37 @@ int x_deltanet_chunk(float *d_core_out, float *d_recurrent,
                         qn_sh[ch * D + c] = q[c] * qfac[ch];
                         kn_sh[ch * D + c] = q[key_dim + c] * kfac[ch];
                     }
+                    // Preserve serial cumulative addition; share exponentials
+                    // across all value columns and contraction stripes.
+                    if (tid == 0) {
+                        float cum = 0.0f;
+                        for (int j = 0; j < L; ++j) {
+                            const float sp = la_sh[j];
+                            cum += -sycl::exp(Alog) * sp;
+                            la_sh[j] = cum;
+                            gamma_sh[j] = sycl::exp(cum);
+                        }
+                        for (int j = 0; j < L; ++j)
+                            tail_decay_sh[j] = sycl::exp(cum - la_sh[j]);
+                    }
                     item.barrier(sycl::access::fence_space::local_space);
                     // 2: decayed inner-product matrices (L*L pair-dots).
                     if (tid < L * L) {
                         const int j = tid / L, m = tid % L;
-                        float dkk = 0.0f, dqk = 0.0f;
-                        for (int d = 0; d < D; ++d) {
-                            const float knm = kn_sh[m * D + d];
-                            dkk += kn_sh[j * D + d] * knm;
-                            dqk += qn_sh[j * D + d] * knm;
+                        float lower = 0.0f, causal = 0.0f;
+                        if (m <= j) {
+                            float dkk = 0.0f, dqk = 0.0f;
+                            for (int d = 0; d < D; ++d) {
+                                const float knm = kn_sh[m * D + d];
+                                dkk += kn_sh[j * D + d] * knm;
+                                dqk += qn_sh[j * D + d] * knm;
+                            }
+                            const float decay = sycl::exp(la_sh[j] - la_sh[m]);
+                            lower = (m < j) ? beta_sh[j] * decay * dkk : 0.0f;
+                            causal = decay * dqk;
                         }
-                        const float decay =
-                            (m <= j) ? sycl::exp(la_sh[j] - la_sh[m]) : 0.0f;
-                        Lmat[j * CK + m] =
-                            (m < j) ? beta_sh[j] * decay * dkk : 0.0f;
-                        Amat[j * CK + m] = (m <= j) ? decay * dqk : 0.0f;
+                        Lmat[j * CK + m] = lower;
+                        Amat[j * CK + m] = causal;
                     }
                     // 3: kS0/qS0 via stripe partials from the register state,
                     // two passes through one SLM buffer.
@@ -474,7 +500,7 @@ int x_deltanet_chunk(float *d_core_out, float *d_recurrent,
                                 d_conv_out[(size_t)t * conv_dim + 2 * key_dim +
                                            (size_t)head * D + c];
                             Dl[j] = beta_sh[j] *
-                                    (vv - sycl::exp(la_sh[j]) * kS0[j]);
+                                    (vv - gamma_sh[j] * kS0[j]);
                         }
                         for (int j = 1; j < L; ++j) {
                             float acc = Dl[j];
@@ -490,7 +516,7 @@ int x_deltanet_chunk(float *d_core_out, float *d_recurrent,
                     for (int j = 0; j < L; ++j) {
                         float acc = 0.0f;
                         if (ch == 0) {
-                            acc = sycl::exp(la_sh[j]) * qS0[j];
+                            acc = gamma_sh[j] * qS0[j];
                             for (int i = 0; i <= j; ++i)
                                 acc += Amat[j * CK + i] * Dl[i];
                         }
@@ -509,12 +535,10 @@ int x_deltanet_chunk(float *d_core_out, float *d_recurrent,
                         }
                     }
                     // 8: state carry in registers (all stripes).
-                    const float la_last = la_sh[L - 1];
-                    const float gamma_last = sycl::exp(la_last);
+                    const float gamma_last = gamma_sh[L - 1];
                     float dec[CK];
                     for (int i = 0; i < L; ++i)
-                        dec[i] = sycl::exp(la_last - la_sh[i]) *
-                                 Dl_sh[i * D + c];
+                        dec[i] = tail_decay_sh[i] * Dl_sh[i * D + c];
                     for (int k = 0; k < kPer; ++k) {
                         float acc = gamma_last * st[k];
                         for (int i = 0; i < L; ++i)

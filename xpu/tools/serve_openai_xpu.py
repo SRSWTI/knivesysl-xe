@@ -40,6 +40,7 @@ Test:  curl localhost:8000/v1/chat/completions -d '{"messages":[{"role":
 """
 from __future__ import annotations
 import argparse, ctypes, json, os, queue, select, socket, sys, threading, time, uuid
+import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ap = argparse.ArgumentParser()
@@ -59,6 +60,9 @@ ap.add_argument("--chunk", type=int, default=64,
                      "smaller = lower ITL jitter, higher TTFT")
 ap.add_argument("--chunk-idle", type=int, default=512,
                 help="total prefill token budget when nothing is decoding")
+ap.add_argument("--prefill-slice-ms", type=float, default=0.0,
+                help="target busy native prefill wave milliseconds (0 disables); "
+                     "adapts within the --chunk cap, minimum 8 rows")
 ap.add_argument("--k64", default=None,
                 help="TQ_XPU_K64 selector ('gate,up,down' or 'all'): the "
                      "opt-in W4A4 prefill tier. Raises aggregate decode "
@@ -193,6 +197,8 @@ if args.paged:
 
 if args.response_idle_timeout <= 0:
     ap.error("--response-idle-timeout must be positive")
+if not math.isfinite(args.prefill_slice_ms) or args.prefill_slice_ms < 0:
+    ap.error("--prefill-slice-ms must be finite and nonnegative")
 if args.prefix_cache_max_mb < 0:
     ap.error("--prefix-cache-max-mb must be nonnegative")
 
@@ -362,6 +368,7 @@ class Engine(threading.Thread):
         self.chunk = max(8, (args.prefix_cache_min // 8) * 8)
         self.chunk_busy = PREFILL_CHUNK_BUSY
         self.chunk_idle = PREFILL_CHUNK_IDLE
+        self.prefill_budget_current = self.chunk_busy
         self.nslots = 0
         self.maxseq = args.ctx
         self.free = []
@@ -576,6 +583,8 @@ class Engine(threading.Thread):
                 "packed_prefill": args.packed_prefill,
                 "prefill_budget_busy": self.chunk_busy,
                 "prefill_budget_idle": self.chunk_idle,
+                "prefill_slice_ms": args.prefill_slice_ms,
+                "prefill_budget_busy_current": self.prefill_budget_current,
                 "prefill_waves": self.prefill_waves,
                 "prefill_rows": self.prefill_rows,
                 "prefill_errors": self.prefill_errors,
@@ -857,9 +866,11 @@ class Engine(threading.Thread):
                 segments.append([g, 0, available, deepest])
             else:
                 self.prefill_tails.append(g)
-        busy = (any(g.state == DECODE for g in self.active) or
-                bool(self.prefill_tails))
-        budget = self.chunk_busy if busy else self.chunk_idle
+        decoding = any(g.state == DECODE for g in self.active)
+        busy = decoding or bool(self.prefill_tails)
+        tune_busy = args.prefill_slice_ms > 0 and decoding
+        budget = (self.prefill_budget_current if tune_busy else
+                  self.chunk_busy if busy else self.chunk_idle)
         # Each tail consumes one prompt row in this iteration's decode batch.
         # Reserve those rows before distributing the ONE shared wave budget.
         units = (budget - len(self.prefill_tails)) // 8
@@ -888,16 +899,20 @@ class Engine(threading.Thread):
         Arr = ctypes.c_int * width
         toks = (ctypes.c_int * rows)(*tokens)
         if args.packed_prefill:
-            rc = LIB.qwn_prefill_batch(
-                Arr(*(s[0].slot for s in segments)), toks,
-                (ctypes.c_int * (width + 1))(*offsets),
-                Arr(*(s[0].pos for s in segments)), width)
+            slots = Arr(*(s[0].slot for s in segments))
+            bounds = (ctypes.c_int * (width + 1))(*offsets)
+            positions = Arr(*(s[0].pos for s in segments))
+            started = time.perf_counter() if tune_busy else None
+            rc = LIB.qwn_prefill_batch(slots, toks, bounds, positions, width)
+            elapsed = time.perf_counter() - started if tune_busy else None
             operation = "qwn_prefill_batch"
         else:
             g = segments[0][0]
             if not self._select_slot(g):
                 return
+            started = time.perf_counter() if tune_busy else None
             rc = LIB.qwn_prefill_chunk(toks, rows, g.pos)
+            elapsed = time.perf_counter() - started if tune_busy else None
             operation = "qwn_prefill_chunk"
         if rc != 0:
             self.prefill_errors += 1
@@ -911,6 +926,13 @@ class Engine(threading.Thread):
             for g, _, _, _ in segments:
                 self._finish(g, "engine_error")
             return
+        if tune_busy and elapsed > 0:
+            # Learn only from completed busy waves and their actual native
+            # rows, not idle waves or unused/tail-reserved budget. This is
+            # a next-wave estimate, not a hard wall-time guarantee.
+            target_rows = min(self.chunk_busy,
+                              rows * (args.prefill_slice_ms / (elapsed * 1e3)))
+            self.prefill_budget_current = max(8, (int(target_rows) // 8) * 8)
         self.prefill_waves += 1
         self.prefill_rows += rows
         self.prefill_width_hist[width] = self.prefill_width_hist.get(width, 0) + 1

@@ -21,15 +21,26 @@ def main():
     ap.add_argument("--tqf", required=True)
     ap.add_argument("--layer", type=int, default=0)
     ap.add_argument("--iters", type=int, default=20)
+    ap.add_argument("--activation", choices=("s8", "s4"), default="s8")
+    ap.add_argument("--check", action="store_true",
+                    help="check nontrivial projection inputs before timing each shape")
     ap.add_argument("--tokens", type=int, nargs="+",
                     default=[8, 16, 32, 64, 128, 256, 512, 1024])
     args = ap.parse_args()
+    if args.iters <= 0 or any(t <= 0 or t % 8 for t in args.tokens):
+        ap.error("iterations must be positive and token counts positive multiples of eight")
 
     lib = ctypes.CDLL(os.path.abspath(args.lib))
     lib.qwn_init.argtypes = [ctypes.c_char_p]
     lib.qwn_init.restype = ctypes.c_int
-    lib.qwn_gemm_bench.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
-    lib.qwn_gemm_bench.restype = ctypes.c_double
+    bench = getattr(lib, "qwn_gemm_bench_w4a4" if args.activation == "s4"
+                    else "qwn_gemm_bench")
+    bench.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    bench.restype = ctypes.c_double
+    check = getattr(lib, "qwn_gemm_w4a4_check" if args.activation == "s4"
+                    else "qwn_gemm_check")
+    check.argtypes = [ctypes.c_int, ctypes.c_int]
+    check.restype = ctypes.c_int
     lib.qwn_free.argtypes = []
     lib.qwn_free.restype = None
 
@@ -38,18 +49,25 @@ def main():
         return 1
 
     M, K = 17408, 5120
-    w_bytes = M * K * 4.5 / 8 + M * (K // 32) * 2   # s4 codes + fp16 scales
+    group = 64 if args.activation == "s4" else 32
+    peak = 733e12 if args.activation == "s4" else DPAS_TOPS
+    w_bytes = M * K // 2 + M * (K // group) * 2
+    print(f"activation={args.activation} M={M} K={K} scale_group={group}; "
+          "activation preparation excluded; byte rate counts one weight pass")
     print(f"{'T':>6} {'us':>10} {'TOPS':>8} {'%DPAS':>7} {'GB/s':>8} "
           f"{'%BW':>6} {'tok/s':>10}")
     for T in args.tokens:
-        us = lib.qwn_gemm_bench(args.layer, T, args.iters)
+        if args.check and check(args.layer, T) != 0:
+            lib.qwn_free()
+            raise RuntimeError(f"projection correctness check failed at T={T}")
+        us = bench(args.layer, T, args.iters)
         if us < 0:
-            print(f"{T:>6}  error rc={us}")
-            continue
+            lib.qwn_free()
+            raise RuntimeError(f"projection benchmark failed at T={T}: rc={us}")
         flops = 2.0 * M * K * T
         tops = flops / (us * 1e-6) / 1e12
         gbs = w_bytes / (us * 1e-6) / 1e9
-        print(f"{T:>6} {us:>10.1f} {tops:>8.1f} {tops/(DPAS_TOPS/1e12)*100:>6.0f}% "
+        print(f"{T:>6} {us:>10.1f} {tops:>8.1f} {tops/(peak/1e12)*100:>6.0f}% "
               f"{gbs:>8.1f} {gbs/(BW/1e9)*100:>5.0f}% {T/(us*1e-6):>10.0f}")
     lib.qwn_free()
     return 0

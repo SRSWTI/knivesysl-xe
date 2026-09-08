@@ -88,6 +88,7 @@ key controls:
 | `PREFILL_XMX=0` / `1` | select scalar reference / require XMX. |
 | `PACKED_PREFILL=0` / `1` | serial / packed prompt waves. |
 | `CHUNK`, `CHUNK_IDLE` | total prefill-wave token budgets, not per-request budgets. |
+| `PREFILL_SLICE_MS` | optional estimated busy-prefill time target in milliseconds; **0 (default)** preserves static budgets. Not a deadline or GPU preemption. |
 
 eight slots with a 131072-token pool **does not mean eight independent 131072-token reservations**. requests that cannot currently obtain their reservation wait for capacity; impossible requests are rejected. GDN state, weights, and scratch also consume device memory.
 
@@ -125,6 +126,59 @@ sources: [retained stage-1 server matrix](benchmarks/xe-stage1-20260905.csv), [t
 we researched SGLang's Intel attention kernels and packed scheduling, but have not recovered a comparable SGLang-XPU/B70 benchmark for this engine. the available parent-workspace `sglang_core.log` belongs to a CUDA/NVFP4 campaign with CUDA graph capture; using those numbers as an Intel-XPU comparison would be wrong. **there is no substantiated SGLang-XPU speedup number to publish yet.** source support and kernel reconnaissance do not establish a performance win.
 
 ## measured results
+
+### Accepted optimization campaign (2026-09-08)
+
+The accepted `libfinal.so` campaign retains **RC16 projection weight reuse**, consumer-specific activation staging, arithmetic-preserving GDN invariant hoisting and a convolution-tail race fix, fused SiLU/multiply/quantization, asynchronous argmax, and fewer batch/reset queue synchronizations. The existing attention implementation remains in place. The RC32 experiment was **rejected and removed**: its projection microbenchmark gain did not produce a consistent whole-model improvement (`rc32-prefill.json`). All accepted results below remain RC16.
+
+These are same-engine before/after measurements on Intel Arc Pro B70, with the same TQF and K64 gate/up/down tier, automatic XMX attention, paged KV (128-token pages), and no speculative decoding. They do not establish a hardware ceiling, vendor parity, task-quality parity, or 75k-token full-model performance.
+
+#### Native prefill, not HTTP TTFT
+
+`bench_prefill.py` times the chunked native call loop, including Python/ctypes chunk-array construction. Model loading, reset, and prompt construction are outside the timer; HTTP, admission, tokenization, and output streaming are absent. This is **whole-model native prefill**, not an isolated GPU kernel timer. The synthetic prompt repeats a fixed token template; chunk size is 512, context/pool capacity 16384, and two state slots are allocated.
+
+| Prompt tokens | Samples per build | Baseline seconds | Accepted seconds | Baseline → accepted tokens/s | Lower latency |
+|---:|---:|---:|---:|---:|---:|
+| 512 | 2 | 0.835939 | 0.649505 | 612.5 → 788.3 | 22.3% |
+| 2048 | 2 | 3.542637 | 2.779666 | 578.1 → 736.8 | 21.5% |
+| 8192 | 2 | 17.256871 | 14.349054 | 474.7 → 570.9 | 16.9% |
+| 16384 | **1** | 43.115557 | 37.430914 | 380.0 → 437.7 | 13.2% |
+
+Seconds are arithmetic means for the smaller repeated cases; throughput is prompt length divided by that mean. The **16k row is a single measurement per build**, not a paired-repeat estimate or confidence interval. Raw evidence: `xpu/build/optimization-20260908-142035/quiet-baseline-prefill.json` and `quiet-final-prefill.json`, with matching invocation/environment receipts. The baseline and final libraries are identified by SHA-256 in each report; these local build artifacts are not bundled with the repository.
+
+The tracked [campaign evidence summary](xpu/results/optimization-20260908.json) retains the samples, library/source identities, correctness gates, HTTP/SSE measurements, rejected RC32 decision, and limitations using portable paths. It is available with the source even when the raw local campaign directory is absent.
+
+#### Paired HTTP results and scheduler tradeoff
+
+With four slots, a 32768-token pool, 16384 per-sequence context, `CHUNK=64`, `CHUNK_IDLE=512`, packed prefill, APC disabled, and the scheduler target at its default zero, two concurrent 2048/4096-token requests generated 32 tokens each. Two repetitions reversed request launch order:
+
+| Metric (mean of two repetitions) | Baseline | Accepted |
+|---|---:|---:|
+| 2048-token request TTFT | 8.376 s | **6.864 s** |
+| 4096-token request TTFT | 14.198 s | **12.049 s** |
+| Complete pair wall time | 15.206 s | **13.055 s** |
+| 2048-token request reported ITL p50 / p99 | 215.4 / 236.1 ms | **191.0 / 208.8 ms** |
+
+TTFT is the server's request-lifecycle first-token latency returned in HTTP metadata, not the native benchmark timer; pair wall time is measured by the client. The reported ITL percentiles are server metadata, and the table averages per-request percentiles rather than recomputing a pooled distribution. These results show 18.1% / 15.1% lower TTFT and 14.1% lower pair wall time, not a new vendor comparison. Sources: `baseline-http-pair-current-metadata.json` and `final-http-pair.json` in the campaign directory.
+
+The optional `PREFILL_SLICE_MS=100` (`--prefill-slice-ms 100`) controller reduces busy-prefill wave budgets using measured cost; **zero remains the default**, retaining the original 8-row budget rounding. In a separate three-repeat workload, a 64-token prompt was already producing 96 output tokens when a 2048-token/16-output request arrived after its eighth nonempty SSE event. Pooled client-observed decode event gaps *during incoming prefill* changed as follows:
+
+| Scheduler setting | Gap p50 | Gap p99 | Incoming mean client TTFT |
+|---|---:|---:|---:|
+| Static, target 0 | 140.3 ms | 165.2 ms | **5.012 s** |
+| Adaptive, target 100 ms | **120.0 ms** | **136.8 ms** | 6.360 s |
+
+This trades about 27% higher incoming TTFT for lower interference; it does not guarantee 100 ms latency. SSE text-event gaps are **not native token intervals**: buffering and empty token text can change event counts. Sources: `safe-static-mixed.json` and `final-target100-mixed.json`. A separate tile-rounded scheduler experiment reached 129.1 ms gap p99 but 7.560 s incoming mean TTFT (`final-target100-tile-mixed.json`) and was not retained.
+
+#### Correctness and rejected candidates
+
+- `final-cross-build-exact.json`: accepted versus frozen baseline matched **96/96 greedy and 96/96 teacher-forced tokens**, with no sampled logit-bit mismatches and finite values, over heap, graph, and transactions continuations. This is sampled cross-build exactness under the recorded configuration, **not universal exactness or scalar/XMX equivalence**.
+- `final-native-page256.json`: 21 production-numerics cases passed, including the aggregate scalar/XMX gate at **90/96**. `final-native-flat-fixed.json`: 31 fixed-split flat cases passed, with **91/96** aggregate agreement. Both retain the graph result of 28/32; the policy is aggregate ≥90%, not a per-prompt guarantee. Width-two logit checks observe the last row exposed by the public ABI.
+- `final-http-regression.json`: all seven scenarios passed, covering short/ragged prompts, packed three-wave APC reuse, exact streaming counts, split stops, structured tools, and disconnect/recovery.
+- Faster GDN reassociations were **rejected**, not hidden behind microbenchmark success: the integrated parallel/reassociated candidate scored **83/96 (86.46%)**, and dot/norm changes scored **82/96 (85.42%)**, below the existing 90% full-model gate. The latter reduced a synthetic 128-row chunk from 1.033 to 0.362 ms but changed arithmetic. Exact-order vectorization was slower. Sources: `integrated-native-production.json`, `gdn-dots-native-production.json`, and `gdn-baseline-128.log`, `gdn-dots-norm-128.log`, `gdn-vector-128.log`.
+- Attention subgroup-count, broadcast, and Q/K caching experiments did not justify replacing the retained implementation. For example, at position 8192 with 512 queries, clean control XMX took 32.481 ms versus 39.888 ms for four subgroups and 40.476 ms for broadcast; cached K also regressed the packed pair (69.319 versus 59.922 ms). Sources: `attention-clean-control-8192-512.log`, `attention-clean-nsg4-8192-512.log`, `attention-clean-broadcast-8192-512.log`, and `attention-kcache-8192-512.log`.
+
+### Earlier XMX versus scalar HTTP comparison (2026-09-07)
 
 paired HTTP measurement on one B70, the same library and K64-MLP weights, concurrent 4096- and 8192-token prompts, 32 generated tokens per request, APC disabled, and two repetitions with reversed launch order:
 
@@ -170,6 +224,58 @@ the retained runnable qualification tools include:
 ```
 
 native qualification initializes a model: run it only on a free, explicitly selected card. do not run it alongside a serving model on that same card. HTTP qualification instead drives an existing endpoint.
+
+### Reproduce the campaign workloads
+
+After the build/setup above, set local model, tokenizer, and library paths. These commands use shipped tools; they do not require vendor checkouts, CUDA references, or archived campaign files. Select a **free card** before native work, and stop that native process before serving on the same card. Run baseline and candidate libraries sequentially with identical settings to make a new comparison.
+
+```bash
+export MODEL=/absolute/path/to/model.tqf
+export MODEL_DIR=/absolute/path/to/tokenizer-directory
+export LIB="$PWD/xpu/build/libforward_qwen_xpu.so"
+export CARD=0
+source /opt/intel/oneapi/setvars.sh --force
+
+ONEAPI_DEVICE_SELECTOR=level_zero:gpu ZE_AFFINITY_MASK="$CARD" \
+TQ_XPU_DEV=0 TQ_XPU_TP=1 TQ_XPU_K64=gate,up,down \
+TQ_XPU_PREFILL_XMX=auto TQ_XPU_PAGED=1 TQ_XPU_KV_PAGE=128 \
+TQ_XPU_KV_POOL_TOKENS=16384 TQ_CTX=16384 TQ_XPU_SLOTS=2 \
+.venv/bin/python xpu/tools/bench_prefill.py \
+  --lib "$LIB" --tqf "$MODEL" --chunk 512 \
+  --ctx 512 512 2048 2048 8192 8192 16384 --loop-ref 0 \
+  --output /tmp/native-prefill.json
+```
+
+Start one foreground server for the HTTP measurements (use another terminal for the client, and stop the server before changing its library or scheduler target):
+
+```bash
+ONEAPI_DEVICE_SELECTOR=level_zero:gpu ZE_AFFINITY_MASK="$CARD" \
+TQ_XPU_DEV=0 TQ_XPU_TP=1 \
+.venv/bin/python xpu/tools/serve_openai_xpu.py \
+  --host 127.0.0.1 --port 8101 --lib "$LIB" --tqf "$MODEL" \
+  --model-dir "$MODEL_DIR" --slots 4 --ctx 16384 \
+  --chunk 64 --chunk-idle 512 --k64 gate,up,down \
+  --paged --kv-page 128 --kv-pool-tokens 32768 --no-prefix-cache \
+  --prefill-xmx auto --packed-prefill --prefill-slice-ms 0
+```
+
+```bash
+.venv/bin/python xpu/tools/serve_smoke_xpu.py \
+  --base-url http://127.0.0.1:8101/v1 --model-dir "$MODEL_DIR" \
+  --model knivesysl-xe-qwen3.8-27b-w4a8 \
+  --mixed 2048,4096 --gen 32 --repeats 2 --benchmark-phase cold \
+  --expect-layout paged --expect-apc off --timeout 180 \
+  --output /tmp/http-pair.json
+
+.venv/bin/python xpu/tools/bench_mixed_latency.py \
+  --base-url http://127.0.0.1:8101/v1 --model-dir "$MODEL_DIR" \
+  --decode-prompt-tokens 64 --decode-gen-tokens 96 \
+  --incoming-prompt-tokens 2048 --incoming-gen-tokens 16 \
+  --trigger-event 8 --repeats 3 --warmup 1 --timeout 60 --deadline 600 \
+  --output /tmp/mixed-static.json
+```
+
+Repeat the mixed-latency client after restarting the same server with `--prefill-slice-ms 100`, writing a different output file. For sampled cross-build checks, `xpu/tools/compare_native_builds.py` can first `--record` a local baseline reference and then `--check --exact` a candidate against it; an archived reference is not a prerequisite. Both invocations require `--lib`, `--tqf`, `--model-dir`, `--reference`, and `--output`, with matching model/environment settings. Use `--help` for the explicit policy and shape controls.
 
 no new 75k full-model benchmark or vendor head-to-head was performed for the XMX/packed-prefill release. some older long-context warm measurements were stopped or never run. paging improves capacity sharing; it does not remove the cost of long cold prefill.
 
