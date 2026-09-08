@@ -1,0 +1,9 @@
+prompt_tokens,concurrency,ttft_seconds,prefill_tokens_per_second,decode_tokens_per_second_per_stream,aggregate_decode_tokens_per_second,provenance
+512,1,0.56,910,27.7,27.7,xpu/CHANGELOG.md historical 2026-09-04 baseline
+512,4,2.06,249,25.3,101,xpu/CHANGELOG.md historical 2026-09-04 baseline
+512,8,3.92,130,19.7,158,xpu/CHANGELOG.md historical 2026-09-04 baseline
+2048,1,4.32,474,19.9,19.9,xpu/CHANGELOG.md historical 2026-09-04 baseline
+2048,4,16.8,122,19.1,76.5,xpu/CHANGELOG.md historical 2026-09-04 baseline
+2048,8,26.9,76,7.8,62.2,xpu/CHANGELOG.md historical 2026-09-04 baseline
+8192,1,55.3,148,10.5,10.5,xpu/CHANGELOG.md historical 2026-09-04 baseline
+8192,4,190.5,43,3.01,12.0,xpu/CHANGELOG.md final vendor 8k x c4 cell

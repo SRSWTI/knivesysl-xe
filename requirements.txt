@@ -1,0 +1,4 @@
+# Tokenizer/chat-template support for serving and qualification.
+transformers
+# Optional numerical parity and probe tools.
+numpy

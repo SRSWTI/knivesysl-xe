@@ -1,0 +1,33 @@
+# Build products and generated experiment results
+build/
+build-*/
+*.so
+*.so.*
+*.o
+*.a
+*.spv
+*.bin
+xpu/probe/*
+!xpu/probe/*.cpp
+!xpu/probe/*.hpp
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Model files and local outputs
+models/
+*.tqf
+*.safetensors
+*.gguf
+*.npz
+*.log
+.env
+.env.*
+
+# External checkouts and scraped documentation
+vendor/
+xpu/docs/gpu-optim-intel/archive/
