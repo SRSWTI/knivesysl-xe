@@ -153,6 +153,10 @@ int main(int argc, char **argv) {
         auto *state = buffers.upload(initial);
         std::vector<float> poison(z.size(), std::numeric_limits<float>::quiet_NaN());
         auto *out = buffers.upload(poison);
+        // Reused for every chunk; allocation/upload stay outside timed work.
+        const size_t factor_capacity = 2 * size_t(rows) * nk;
+        auto *factors = buffers.upload(std::vector<float>(
+            factor_capacity, std::numeric_limits<float>::quiet_NaN()));
         std::cout << std::setprecision(12);
         std::cout << "{\"kind\":\"inputs\",\"rows\":" << rows << ",\"nk\":" << nk
                   << ",\"nv\":" << nv << ",\"seed\":\"6947ab21\",\"conv_hash\":\""
@@ -187,7 +191,8 @@ int main(int argc, char **argv) {
                         if (x_deltanet_chunk(out + size_t(t) * value_dim, state,
                                 dc + size_t(t) * conv_dim, dz + size_t(t) * value_dim,
                                 db + size_t(t) * nv, da + size_t(t) * nv, dalog, dbias,
-                                dnorm, count, nk, D, nv, D, eps))
+                                dnorm, count, nk, D, nv, D, eps,
+                                factors, factor_capacity))
                             throw std::runtime_error("x_deltanet_chunk rejected shape");
                     }
                 }

@@ -1652,6 +1652,7 @@ struct prefill_scratch {
     float *qkv = nullptr, *z = nullptr, *b = nullptr, *a = nullptr, *core = nullptr;
     float *gate = nullptr, *up = nullptr, *hidden = nullptr;
     float *conv = nullptr;     // chunked GDN conv output [T, conv_dim]
+    float *decode_scores = nullptr; // persistent [slots, nh, max_seq], lazily allocated
     int8_t *aq = nullptr;
     float *as = nullptr;
     int32_t *asum = nullptr;
@@ -1681,6 +1682,8 @@ struct wave_scratch {
     float *recur_snap = nullptr;   // [L][heads * dv * dv]
     float *conv_snap = nullptr;    // [L][conv_dim * ks]
     float *logits = nullptr;       // [8 * V]
+    float *argmax_vals = nullptr;  // [TQ_ARGMAX_MAX_ROWS * (TQ_ARGMAX_BLOCKS+1)]
+    int *argmax_ids = nullptr;     // same bounded layout as argmax_vals
     int capture = 0;               // pf_linear_layer caches inputs when set
 };
 wave_scratch g_wave;
@@ -1689,7 +1692,7 @@ void pf_free(void) {
     for (float **p : {&g_pf.x, &g_pf.resid, &g_pf.normed, &g_pf.layer_out,
                       &g_pf.qkv, &g_pf.z, &g_pf.b, &g_pf.a, &g_pf.core,
                       &g_pf.gate, &g_pf.up, &g_pf.hidden, &g_pf.conv,
-                      &g_pf.as}) {
+                      &g_pf.as, &g_pf.decode_scores}) {
         if (*p) { tq_dev_free(*p); *p = nullptr; }
     }
     if (g_pf.aq) { tq_dev_free(g_pf.aq); g_pf.aq = nullptr; }
@@ -1704,9 +1707,10 @@ void wave_free(void) {
     for (float **p : {&g_wave.qkv_cache, &g_wave.conv_cache,
                       &g_wave.b_cache, &g_wave.a_cache,
                       &g_wave.recur_snap, &g_wave.conv_snap,
-                      &g_wave.logits}) {
+                      &g_wave.logits, &g_wave.argmax_vals}) {
         if (*p) { tq_dev_free(*p); *p = nullptr; }
     }
+    if (g_wave.argmax_ids) tq_dev_free(g_wave.argmax_ids);
     g_wave = wave_scratch{};
 }
 
@@ -1954,10 +1958,14 @@ int pf_linear_segment(int layer, int first, int T, int slot, bool capture) {
             tq_d2d_async(g_wave.a_cache + (size_t)layer * 8 * heads, a,
                          (size_t)T * heads * sizeof(float));
         }
+        // MLP hidden scratch is dead until pf_mlp; use this segment's region.
+        // x_deltanet_chunk checks the capacity before launching factor work.
         if (x_deltanet_chunk(core, slot_recur_at(l, slot), conv,
                              z, b, a, l->d_linear_A_log,
                              l->d_linear_dt_bias, l->d_linear_norm, T,
-                             key_heads, dim, heads, dim, m->eps) != 0)
+                             key_heads, dim, heads, dim, m->eps,
+                             g_pf.hidden + (size_t)first * m->I,
+                             (size_t)T * m->I) != 0)
             return -7;
     } else {
         for (int t = 0; t < T; ++t) {
@@ -2228,6 +2236,10 @@ int wave_ensure(void) {
         return static_cast<float *>(tq_try_dev_alloc(n * sizeof(float), what));
     };
     g_wave.logits = fa((size_t)8 * m->V, "wave.logits");
+    constexpr size_t argmax_count = TQ_ARGMAX_MAX_ROWS * (TQ_ARGMAX_BLOCKS + 1);
+    g_wave.argmax_vals = fa(argmax_count, "wave.argmax_vals");
+    g_wave.argmax_ids = static_cast<int *>(
+        tq_try_dev_alloc(argmax_count * sizeof(int), "wave.argmax_ids"));
     if (!g_pg_enabled) {
         g_wave.qkv_cache = fa((size_t)m->L * 8 * g_wave.row_w, "wave.qkv");
         g_wave.conv_cache = fa((size_t)m->L * 8 * g_wave.row_w, "wave.conv");
@@ -2238,7 +2250,7 @@ int wave_ensure(void) {
         g_wave.conv_snap =
             fa((size_t)m->L * conv_dim * ks, "wave.convsnap");
     }
-    if (!g_wave.logits ||
+    if (!g_wave.logits || !g_wave.argmax_vals || !g_wave.argmax_ids ||
         (!g_pg_enabled &&
          (!g_wave.qkv_cache || !g_wave.conv_cache || !g_wave.b_cache ||
           !g_wave.a_cache || !g_wave.recur_snap || !g_wave.conv_snap))) {
@@ -2321,9 +2333,10 @@ extern "C" int qwn_spec_wave(const int *tokens, int pos0, int *out_tokens) {
     if (lret != 0) return lret;
 
     // Batched lm_head over all 8 rows (W8A8 GEMM when repacked; GEMV loop
-    // otherwise), then per-row argmax.
+    // otherwise), then argmax with one batched host completion.
     x_rmsnorm_chunk(g_pf.normed, g_pf.x, m->d_norm, m->H, W, m->eps);
     int am[W];
+    float am_logits[W];
     if (m->lm_head.s8_ready) {
         x_quantize_act_chunk(g_pf.normed, m->H, W, g_pf.aq, g_pf.as, g_pf.asum);
         if (x_gemm_w8a8(&m->lm_head, g_pf.aq, g_pf.as, g_wave.logits, W) != 0)
@@ -2334,11 +2347,10 @@ extern "C" int qwn_spec_wave(const int *tokens, int pos0, int *out_tokens) {
                             g_wave.logits + (size_t)j * m->V) != 0)
                 return -7;
     }
-    for (int j = 0; j < W; ++j) {
-        x_argmax(g_wave.logits + (size_t)j * m->V, m->V, m->d_argmax_vals,
-                 m->d_argmax_ids, &m->last_argmax_id, &m->last_argmax_logit);
-        am[j] = m->last_argmax_id;
-    }
+    x_argmax_batch(g_wave.logits, m->V, W, g_wave.argmax_vals,
+                   g_wave.argmax_ids, am, am_logits);
+    m->last_argmax_id = am[W - 1];
+    m->last_argmax_logit = am_logits[W - 1];
 
     // Verify: accept drafts while they match; the model's own token follows.
     int A = 0;
@@ -2363,6 +2375,7 @@ extern "C" int qwn_spec_wave(const int *tokens, int pos0, int *out_tokens) {
             // Outputs are discarded (accepted rows already produced their
             // outputs in the wave); only the state math matters, and it does
             // not read the gate, so g_pf.z can hold anything.
+            // Rewind discards core outputs and does not consume MLP hidden.
             if (x_deltanet_chunk(g_pf.core, slot_recur(l),
                                  g_wave.conv_cache + (size_t)layer * 8 * g_wave.row_w,
                                  g_pf.z,
@@ -2371,7 +2384,8 @@ extern "C" int qwn_spec_wave(const int *tokens, int pos0, int *out_tokens) {
                                  l->d_linear_A_log, l->d_linear_dt_bias,
                                  l->d_linear_norm, A + 1,
                                  m->linear_num_key_heads, dim, heads, dim,
-                                 m->eps) != 0)
+                                 m->eps, g_pf.hidden,
+                                 (size_t)(A + 1) * m->I) != 0)
                 return -8;
         }
     }
@@ -2390,8 +2404,8 @@ extern "C" int qwn_spec_wave(const int *tokens, int pos0, int *out_tokens) {
 // token lands in out_tokens[i]. Projections, MLP and lm_head ride the
 // batched RC8 GEMM path - one weight stream serves every row, which is the
 // whole point: decode is weight-stream-bound, so rows are nearly free.
-// Attention and the GDN core run per-row against that slot's state (small
-// kernels; the in-order queue serializes the shared d_scores scratch).
+// Attention and GDN keep independent per-slot state. Row-batched
+// grids preserve each row's arithmetic; batched attention owns per-row scratch.
 // Rows are independent: any subset of slots, any mix of positions. Requires
 // the batchable W4 tier (same guard as prefill/wave).
 // Model-free gate for the block pool. Needs no weights, so the substrate is
@@ -2704,7 +2718,7 @@ extern "C" int qwn_decode_batch(const int *slots, const int *tokens,
     if (!m->initialized || !slots || !tokens || !positions || !out_tokens)
         return -1;
     const int S = m->slots < 1 ? 1 : m->slots;
-    if (n < 1 || n > S || n > 8) return -2;
+    if (n < 1 || n > S || n > TQ_ARGMAX_MAX_ROWS) return -2;
     for (int i = 0; i < n; ++i) {
         if (slots[i] < 0 || slots[i] >= S) return -2;
         if (tokens[i] < 0 || tokens[i] >= m->V) return -3;
@@ -2715,6 +2729,14 @@ extern "C" int qwn_decode_batch(const int *slots, const int *tokens,
     if (!pf_layers_batchable()) return -4;
     if (pf_ensure(8) != 0) return -6;
     if (wave_ensure() != 0) return -6;   // borrows the 8-row logits slab
+    if (n > 1 && !g_pf.decode_scores) {
+        const size_t rows = static_cast<size_t>(S) * m->nh;
+        if (rows > std::numeric_limits<size_t>::max() / sizeof(float) /
+                       static_cast<size_t>(m->max_seq)) return -6;
+        g_pf.decode_scores = static_cast<float *>(tq_try_dev_alloc(
+            rows * static_cast<size_t>(m->max_seq) * sizeof(float), "batch.attn.scores"));
+        if (!g_pf.decode_scores) return -6;
+    }
     if (g_pg_enabled) {
         int counts[8];
         for (int i = 0; i < n; ++i) counts[i] = 1;
@@ -2735,6 +2757,26 @@ extern "C" int qwn_decode_batch(const int *slots, const int *tokens,
     const int kv_w = m->nkv * m->hd;
     const int core_w = m->nh * m->hd;
 
+    // Unlike per-slot timing, aggregate boundaries retain all row submissions
+    // between waits. RAII clears the shared profiler on errors/exceptions too.
+    struct BatchProfileScope {
+        ProfileRun run;
+        bool enabled;
+        explicit BatchProfileScope(bool on) : enabled(on) {
+            if (!enabled) return;
+            tq_q().wait_and_throw();
+            g_profile_mark = std::chrono::steady_clock::now();
+            g_profile_run = &run;
+        }
+        ~BatchProfileScope() {
+            if (g_profile_run == &run) g_profile_run = nullptr;
+        }
+    };
+    const char *profile_pos = getenv("TQ_XPU_PROFILE_BATCH_POS");
+    BatchProfileScope profile(profile_pos && positions[0] == atoi(profile_pos));
+    double mlp_ms = 0.0;
+    double argmax_ms = 0.0;
+
     // The batched GEMMs are RC8: one 256-byte weight fragment serves EIGHT
     // activation rows, so the step's natural width is 8 and T must be a
     // multiple of 8. n < 8 real rows ride the same weight stream; the pad
@@ -2746,14 +2788,36 @@ extern "C" int qwn_decode_batch(const int *slots, const int *tokens,
     if (n < Tp)   // deterministic pad rows (zero in, finite through)
         tq_q().memset(g_pf.x + (size_t)n * m->H, 0,
                       (size_t)(Tp - n) * m->H * sizeof(float));
+    profile_mark(kProfileEmbed);
     for (int layer = 0; layer < m->L; ++layer) {
         tq_layer_t *l = &m->layers[layer];
         x_rmsnorm_chunk(g_pf.normed, g_pf.x, l->d_input_ln, m->H, Tp, m->eps);
+        profile_mark(kProfileNorm);
         if (m->layer_types[layer] == TQ_LAYER_FULL_ATTENTION) {
             pf_stage(g_pf.normed, m->H, Tp, &l->q_proj, &l->k_proj, &l->v_proj);
+            profile_mark(kProfileQuant);
             if (pf_gemm(&l->q_proj, g_pf.qkv, Tp) != 0) return -7;
             if (pf_gemm(&l->k_proj, g_pf.b, Tp) != 0) return -7;
             if (pf_gemm(&l->v_proj, g_pf.z, Tp) != 0) return -7;
+            profile_mark(kProfileProjection);
+            if (n > 1) {
+                tq_decode_attn_request_t attention_rows[TQ_ARGMAX_MAX_ROWS]{};
+                const size_t score_stride = static_cast<size_t>(m->nh) * m->max_seq;
+                for (int i = 0; i < n; ++i) {
+                    attention_rows[i] = {
+                        g_pf.core + static_cast<size_t>(i) * core_w,
+                        g_pf.qkv + static_cast<size_t>(i) * qkv_w,
+                        g_pf.b + static_cast<size_t>(i) * kv_w,
+                        g_pf.z + static_cast<size_t>(i) * kv_w,
+                        kv_k_at(l, slots[i]), kv_v_at(l, slots[i]),
+                        kv_ks_at(l, slots[i]), kv_vs_at(l, slots[i]),
+                        g_pf.decode_scores + static_cast<size_t>(i) * score_stride,
+                        positions[i], tq_pool_layout(slots[i])};
+                }
+                x_full_attn_decode_batch(attention_rows, n, l->d_q_norm, l->d_k_norm,
+                                         m->nh, m->nkv, m->hd, m->eps, m->rope_theta,
+                                         m->partial_rotary_factor, m->max_seq);
+            } else
             for (int i = 0; i < n; ++i)
                 x_full_attn_decode(g_pf.core + (size_t)i * core_w,
                                    g_pf.qkv + (size_t)i * qkv_w,
@@ -2768,18 +2832,44 @@ extern "C" int qwn_decode_batch(const int *slots, const int *tokens,
                                    m->hd, m->eps, m->rope_theta,
                                    m->partial_rotary_factor, m->max_seq,
                                    tq_pool_layout(slots[i]));
+            profile_mark(kProfileAttention);
             if (n < Tp)
                 tq_q().memset(g_pf.core + (size_t)n * core_w, 0,
                               (size_t)(Tp - n) * core_w * sizeof(float));
             pf_stage(g_pf.core, core_w, Tp, &l->o_proj);
+            profile_mark(kProfileQuant);
             if (pf_gemm(&l->o_proj, g_pf.resid, Tp) != 0) return -7;
+            profile_mark(kProfileProjection);
         } else if (m->layer_types[layer] == TQ_LAYER_LINEAR_ATTENTION) {
             pf_stage(g_pf.normed, m->H, Tp, &l->linear_in_qkv, &l->linear_in_z,
                       &l->linear_in_b, &l->linear_in_a);
+            profile_mark(kProfileQuant);
             if (pf_gemm(&l->linear_in_qkv, g_pf.qkv, Tp) != 0) return -7;
             if (pf_gemm(&l->linear_in_z, g_pf.z, Tp) != 0) return -7;
             if (pf_gemm(&l->linear_in_b, g_pf.b, Tp) != 0) return -7;
             if (pf_gemm(&l->linear_in_a, g_pf.a, Tp) != 0) return -7;
+            profile_mark(kProfileProjection);
+            if (n > 1) {
+                static_assert(TQ_LINEAR_DECODE_MAX_ROWS >= TQ_ARGMAX_MAX_ROWS);
+                tq_linear_decode_row linear_rows[TQ_LINEAR_DECODE_MAX_ROWS]{};
+                for (int i = 0; i < n; ++i) {
+                    float *qkv_i = g_pf.qkv + (size_t)i * conv_dim;
+                    linear_rows[i] = {qkv_i, slot_conv_at(l, slots[i]), qkv_i,
+                                      g_pf.core + (size_t)i * value_dim,
+                                      slot_recur_at(l, slots[i]),
+                                      g_pf.z + (size_t)i * value_dim,
+                                      g_pf.b + (size_t)i * heads,
+                                      g_pf.a + (size_t)i * heads};
+                }
+                if (x_linear_conv_update_batch(linear_rows, n, l->d_linear_conv1d,
+                                               conv_dim, m->linear_conv_kernel_dim) != 0)
+                    return -7;
+                if (x_linear_decode_core_gated_batch(linear_rows, n, l->d_linear_A_log,
+                                                     l->d_linear_dt_bias,
+                                                     l->d_linear_norm, key_heads, dim,
+                                                     heads, dim, m->eps) != 0)
+                    return -7;
+            } else
             for (int i = 0; i < n; ++i) {
                 float *qkv_i = g_pf.qkv + (size_t)i * conv_dim;
                 x_linear_conv_update(qkv_i, slot_conv_at(l, slots[i]), qkv_i,
@@ -2795,23 +2885,35 @@ extern "C" int qwn_decode_batch(const int *slots, const int *tokens,
                                            l->d_linear_norm, key_heads, dim,
                                            heads, dim, m->eps);
             }
+            // One boundary measures every stateful row without per-row waits.
+            // Batch mode queues all conv work before the independent core grid.
+            profile_mark(kProfileDelta);
             if (n < Tp)
                 tq_q().memset(g_pf.core + (size_t)n * value_dim, 0,
                               (size_t)(Tp - n) * value_dim * sizeof(float));
             pf_stage(g_pf.core, value_dim, Tp, &l->linear_out);
+            profile_mark(kProfileQuant);
             if (pf_gemm(&l->linear_out, g_pf.resid, Tp) != 0) return -7;
+            profile_mark(kProfileProjection);
         } else {
             return -7;
         }
         x_add_inplace(g_pf.resid, g_pf.x, Tp * m->H);
+        profile_mark(kProfileResidual);
+        const auto mlp_start = g_profile_mark;
         if (pf_mlp(l, Tp) != 0) return -8;
+        if (profile.enabled)
+            mlp_ms += std::chrono::duration<double, std::milli>(
+                g_profile_mark - mlp_start).count();
         float *old = g_pf.x;
         g_pf.x = g_pf.layer_out;
         g_pf.layer_out = old;
     }
     x_rmsnorm_chunk(g_pf.normed, g_pf.x, m->d_norm, m->H, Tp, m->eps);
+    profile_mark(kProfileFinalNorm);
     if (m->lm_head.s8_ready) {
         x_quantize_act_chunk(g_pf.normed, m->H, Tp, g_pf.aq, g_pf.as, g_pf.asum);
+        profile_mark(kProfileQuant);
         if (x_gemm_w8a8(&m->lm_head, g_pf.aq, g_pf.as, g_wave.logits, Tp) != 0)
             return -9;
     } else {
@@ -2820,13 +2922,42 @@ extern "C" int qwn_decode_batch(const int *slots, const int *tokens,
                             g_wave.logits + (size_t)i * m->V) != 0)
                 return -9;
     }
+    profile_mark(kProfileLmHead);
+    const auto argmax_start = g_profile_mark;
+    float am_logits[TQ_ARGMAX_MAX_ROWS];
+    x_argmax_batch(g_wave.logits, m->V, n, g_wave.argmax_vals,
+                   g_wave.argmax_ids, out_tokens, am_logits);
+    profile_mark(kProfileLmHead);
+    if (profile.enabled)
+        argmax_ms = std::chrono::duration<double, std::milli>(
+            g_profile_mark - argmax_start).count();
+    m->last_argmax_id = out_tokens[n - 1];
+    m->last_argmax_logit = am_logits[n - 1];
     for (int i = 0; i < n; ++i) {
-        x_argmax(g_wave.logits + (size_t)i * m->V, m->V, m->d_argmax_vals,
-                 m->d_argmax_ids, &m->last_argmax_id, &m->last_argmax_logit);
-        out_tokens[i] = m->last_argmax_id;
         m->state_pos[slots[i]] = positions[i] + 1;
     }
-    tq_q().wait();
+    if (profile.enabled) {
+        static const char *names[kProfileStageCount] = {
+            "embed", "norm", "staging", "projection", "conv",
+            "stateful_gdn", "attention", "activation", "residual",
+            "final_norm", "lm_head",
+        };
+        double total = 0.0;
+        for (double ms : profile.run.ms) total += ms;
+        fprintf(stderr, "[xpu-batch-profile] pos=%d width=%d padded=%d total=%.3f ms\n",
+                positions[0], n, Tp, total);
+        for (int stage = 0; stage < kProfileStageCount; ++stage) {
+            const bool lm_head = stage == kProfileLmHead;
+            fprintf(stderr, "  %-12s %8.3f ms  calls=%d\n", names[stage],
+                    profile.run.ms[stage] - (lm_head ? argmax_ms : 0.0),
+                    profile.run.calls[stage] - (lm_head ? 1 : 0));
+        }
+        fprintf(stderr, "  %-12s %8.3f ms  calls=1\n", "argmax", argmax_ms);
+        // This is a subtotal, not another additive phase: pf_mlp already
+        // attributes its norm/staging, GEMMs/SiLU and down/residual internally.
+        fprintf(stderr, "  mlp_subtotal %8.3f ms  layers=%d (included above)\n",
+                mlp_ms, m->L);
+    }
     return n;
 }
 

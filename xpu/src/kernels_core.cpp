@@ -280,26 +280,31 @@ void x_add_inplace(float *d_x, const float *d_y, int N) {
         });
 }
 
-void x_argmax(const float *d_logits, int V, float *d_vals, int *d_ids,
-              int *out_id, float *out_logit) {
-    if (!out_id || !out_logit) return;
+void x_argmax_batch(const float *d_logits, int V, int rows,
+                    float *d_vals, int *d_ids, int *out_ids, float *out_logits) {
+    if (!out_ids || !out_logits || rows < 1 || rows > TQ_ARGMAX_MAX_ROWS) return;
     if (!d_logits || !d_vals || !d_ids || V <= 0) {
-        *out_id = 0;
-        *out_logit = kNegativeFloatMax;
+        for (int row = 0; row < rows; ++row) {
+            out_ids[row] = 0;
+            out_logits[row] = kNegativeFloatMax;
+        }
         return;
     }
 
     constexpr size_t stage1_local = 256;
     constexpr size_t stage1_groups = TQ_ARGMAX_BLOCKS;
+    const size_t result_base = static_cast<size_t>(rows) * stage1_groups;
     tq_q().submit([&](sycl::handler &handler) {
         sycl::local_accessor<float, 1> values(sycl::range<1>(stage1_local), handler);
         sycl::local_accessor<int, 1> ids(sycl::range<1>(stage1_local), handler);
         handler.parallel_for<ArgmaxStage1Kernel>(
-            sycl::nd_range<1>(sycl::range<1>(stage1_groups * stage1_local),
+            sycl::nd_range<1>(sycl::range<1>(rows * stage1_groups * stage1_local),
                               sycl::range<1>(stage1_local)),
             [=](sycl::nd_item<1> item) {
                 const int tid = static_cast<int>(item.get_local_linear_id());
-                const int block = static_cast<int>(item.get_group_linear_id());
+                const size_t group = item.get_group_linear_id();
+                const size_t row = group / stage1_groups;
+                const int block = static_cast<int>(group % stage1_groups);
                 const int first = block * static_cast<int>(stage1_local) + tid;
                 const int stride = static_cast<int>(stage1_groups * stage1_local);
                 float best = kNegativeFloatMax;
@@ -307,7 +312,7 @@ void x_argmax(const float *d_logits, int V, float *d_vals, int *d_ids,
 
                 // CUDA src/forward_qwen.cu:11987-11995: grid-stride stage-1 scan.
                 for (int i = first; i < V; i += stride) {
-                    const float candidate = d_logits[i];
+                    const float candidate = d_logits[row * static_cast<size_t>(V) + i];
                     if (tq_argmax_better(candidate, i, best, best_id)) {
                         best = candidate;
                         best_id = i;
@@ -328,8 +333,8 @@ void x_argmax(const float *d_logits, int V, float *d_vals, int *d_ids,
                     item.barrier(sycl::access::fence_space::local_space);
                 }
                 if (tid == 0) {
-                    d_vals[block] = values[0];
-                    d_ids[block] = ids[0];
+                    d_vals[group] = values[0];
+                    d_ids[group] = ids[0];
                 }
             });
     });
@@ -339,13 +344,15 @@ void x_argmax(const float *d_logits, int V, float *d_vals, int *d_ids,
         sycl::local_accessor<float, 1> values(sycl::range<1>(stage2_local), handler);
         sycl::local_accessor<int, 1> ids(sycl::range<1>(stage2_local), handler);
         handler.parallel_for<ArgmaxStage2Kernel>(
-            sycl::nd_range<1>(sycl::range<1>(stage2_local), sycl::range<1>(stage2_local)),
+            sycl::nd_range<1>(sycl::range<1>(rows * stage2_local), sycl::range<1>(stage2_local)),
             [=](sycl::nd_item<1> item) {
                 const int tid = static_cast<int>(item.get_local_linear_id());
+                const size_t row = item.get_group_linear_id();
+                const size_t partial_base = row * stage1_groups;
                 // CUDA src/forward_qwen.cu:12018-12021: stage 2 consumes all
                 // TQ_ARGMAX_BLOCKS partial winners.
-                values[tid] = d_vals[tid];
-                ids[tid] = d_ids[tid];
+                values[tid] = d_vals[partial_base + tid];
+                ids[tid] = d_ids[partial_base + tid];
                 item.barrier(sycl::access::fence_space::local_space);
 
                 // CUDA src/forward_qwen.cu:12023-12028: 1024-way tree reduction.
@@ -359,10 +366,10 @@ void x_argmax(const float *d_logits, int V, float *d_vals, int *d_ids,
                     item.barrier(sycl::access::fence_space::local_space);
                 }
                 if (tid == 0) {
-                    // CUDA src/forward_qwen.cu:16678-16680 stores the final pair
-                    // in scratch slot TQ_ARGMAX_BLOCKS.
-                    d_vals[TQ_ARGMAX_BLOCKS] = values[0];
-                    d_ids[TQ_ARGMAX_BLOCKS] = ids[0];
+                    // Keep final pairs contiguous for one batched readback.
+                    // For one row this is the original TQ_ARGMAX_BLOCKS slot.
+                    d_vals[result_base + row] = values[0];
+                    d_ids[result_base + row] = ids[0];
                 }
             });
     });
@@ -370,7 +377,12 @@ void x_argmax(const float *d_logits, int V, float *d_vals, int *d_ids,
     // CUDA src/forward_qwen.cu:16678-16680 plus its following host readback:
     // the in-order queue completes both stages before these copies, and the wait
     // is mandatory because the caller consumes the host pair immediately.
-    tq_q().memcpy(out_id, d_ids + TQ_ARGMAX_BLOCKS, sizeof(*out_id));
-    tq_q().memcpy(out_logit, d_vals + TQ_ARGMAX_BLOCKS, sizeof(*out_logit));
+    tq_q().memcpy(out_ids, d_ids + result_base, rows * sizeof(*out_ids));
+    tq_q().memcpy(out_logits, d_vals + result_base, rows * sizeof(*out_logits));
     tq_q().wait_and_throw();
+}
+
+void x_argmax(const float *d_logits, int V, float *d_vals, int *d_ids,
+              int *out_id, float *out_logit) {
+    x_argmax_batch(d_logits, V, 1, d_vals, d_ids, out_id, out_logit);
 }

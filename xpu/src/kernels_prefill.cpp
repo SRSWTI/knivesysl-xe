@@ -4,6 +4,15 @@
 #include <stdexcept>
 #include <string>
 
+// Two components intentionally reduce precision; qualification thresholds
+// remain unchanged. Three preserves the original residual arithmetic.
+#ifndef TQ_XPU_PREFILL_COMPONENTS
+#define TQ_XPU_PREFILL_COMPONENTS 3
+#endif
+#if TQ_XPU_PREFILL_COMPONENTS != 2 && TQ_XPU_PREFILL_COMPONENTS != 3
+#error "TQ_XPU_PREFILL_COMPONENTS must be 2 or 3"
+#endif
+
 // SIMD16 RC8: C[8,16] += A[8,16] * B[16,16]. A is row-major
 // packed BF16 pairs; B is VNNI-packed along K. These are the same operand
 // aliases as the existing decode DPAS kernel and dpas_attn_probe.cpp.
@@ -230,7 +239,11 @@ void prefill_xmx(const tq_prefill_attn_request_t *requests, int n,
                                    (static_cast<uint32_t>(e4m3_bf16(kc[kb + c * KT + 2 * p + 1])) << 16);
                         }
                         PREFILL_DPAS(score, afr[c], b);
+#if TQ_XPU_PREFILL_COMPONENTS == 3
                         U4 amid, alo;
+#else
+                        U4 amid;
+#endif
                         #pragma unroll
                         for (int i = 0; i < 4; ++i) {
                             const int a = qs + c * QR * KT + (2 * i + apair) * KT + adim;
@@ -241,13 +254,19 @@ void prefill_xmx(const tq_prefill_attn_request_t *requests, int n,
                             const float r1 = sycl::bit_cast<float>(hi1 | qlo[a + 1]) -
                                              sycl::bit_cast<float>(hi1);
                             const uint16_t m0 = bf16_rne(r0), m1 = bf16_rne(r1);
+#if TQ_XPU_PREFILL_COMPONENTS == 3
                             const uint16_t l0 = bf16_rne(r0 - bf16_float(m0));
                             const uint16_t l1 = bf16_rne(r1 - bf16_float(m1));
+#endif
                             amid[i] = static_cast<uint32_t>(m0) | (static_cast<uint32_t>(m1) << 16);
+#if TQ_XPU_PREFILL_COMPONENTS == 3
                             alo[i] = static_cast<uint32_t>(l0) | (static_cast<uint32_t>(l1) << 16);
+#endif
                         }
                         PREFILL_DPAS(score, amid, b);
+#if TQ_XPU_PREFILL_COMPONENTS == 3
                         PREFILL_DPAS(score, alo, b);
+#endif
                     }
                     // Each subgroup contributes 1/8 of V's dimensions. One
                     // cache read/dequantization serves all64 query rows.
@@ -270,12 +289,20 @@ void prefill_xmx(const tq_prefill_attn_request_t *requests, int n,
                         prob[ps + r * KT + lane] = hi;
                         const float residual = pv - bf16_float(hi);
                         const uint16_t mid = bf16_rne(residual);
+#if TQ_XPU_PREFILL_COMPONENTS == 3
                         const uint16_t lo = bf16_rne(residual - bf16_float(mid));
                         plo[ps + r * KT + lane] = static_cast<uint32_t>(mid) |
                             (static_cast<uint32_t>(lo) << 16);
+#else
+                        plo[ps + r * KT + lane] = static_cast<uint32_t>(mid);
+#endif
                     }
                     item.barrier(sycl::access::fence_space::local_space);
+#if TQ_XPU_PREFILL_COMPONENTS == 3
                     U4 pfr, pmfr, plfr;
+#else
+                    U4 pfr, pmfr;
+#endif
                     #pragma unroll
                     for (int i = 0; i < 4; ++i) {
                         const int a = ps + (2 * i + apair) * KT + adim;
@@ -283,7 +310,9 @@ void prefill_xmx(const tq_prefill_attn_request_t *requests, int n,
                                  (static_cast<uint32_t>(prob[a + 1]) << 16);
                         const uint32_t r0 = plo[a], r1 = plo[a + 1];
                         pmfr[i] = (r0 & 0xffffu) | (r1 << 16);
+#if TQ_XPU_PREFILL_COMPONENTS == 3
                         plfr[i] = (r0 >> 16) | (r1 & 0xffff0000u);
+#endif
                     }
                     #pragma unroll
                     for (int c = 0; c < HD / KT; ++c) {
@@ -298,7 +327,9 @@ void prefill_xmx(const tq_prefill_attn_request_t *requests, int n,
                         for (int r = 0; r < QR; ++r) o[r] = 0.0f;
                         PREFILL_DPAS(o, pfr, b);
                         PREFILL_DPAS(o, pmfr, b);
+#if TQ_XPU_PREFILL_COMPONENTS == 3
                         PREFILL_DPAS(o, plfr, b);
+#endif
                         #pragma unroll
                         for (int r = 0; r < QR; ++r)
                             accum[c][r] = accum[c][r] * rescale[r] + o[r];

@@ -1026,7 +1026,37 @@ int x_gemv_w4a8_fanout(const tq_qmma_weight_t *const *ws, float *const *ys,
                         sb + (size_t)lg * (Kt >> ksh) * 16u;
                     const int kt_begin = Kt * split / splits;
                     const int kt_end = Kt * (split + 1) / splits;
-                    for (int kt = kt_begin; kt < kt_end; ++kt) {
+                    int kt = kt_begin;
+                    // Put two independent operand sets in flight, but keep
+                    // the original serial floating-point accumulation order.
+                    for (; kt + 1 < kt_end; kt += 2) {
+                        const uint16_t a0 = *reinterpret_cast<const uint16_t *>(
+                            d_q + (size_t)kt * 32 + 2 * lane);
+                        const uint16_t a1 = *reinterpret_cast<const uint16_t *>(
+                            d_q + (size_t)(kt + 1) * 32 + 2 * lane);
+                        const uintv4 b0 = *reinterpret_cast<const uintv4 *>(
+                            bbase + (size_t)kt * 256u + (size_t)lane * 16u);
+                        const uintv4 b1 = *reinterpret_cast<const uintv4 *>(
+                            bbase + (size_t)(kt + 1) * 256u + (size_t)lane * 16u);
+                        const uint16_t p0 = sbase[(size_t)(kt >> ksh) * 16u + lane];
+                        const uint16_t p1 = sbase[(size_t)((kt + 1) >> ksh) * 16u + lane];
+                        const int32_t sum0 = d_sum[2 * kt] + d_sum[2 * kt + 1];
+                        const int32_t sum1 = d_sum[2 * kt + 2] + d_sum[2 * kt + 3];
+                        const float as0 = d_as[kt], as1 = d_as[kt + 1];
+                        int32_t d0 = 0, d1 = 0;
+                        DPAS_S4S8_RC1(d0, a0, b0);
+                        DPAS_S4S8_RC1(d1, a1, b1);
+                        int z0 = (int)(p0 & 0xFu), z1 = (int)(p1 & 0xFu);
+                        if (z0 >= 8) z0 -= 16;
+                        if (z1 >= 8) z1 -= 16;
+                        const float ws0 = (float)sycl::bit_cast<sycl::half>(
+                            (uint16_t)(p0 & 0xFFF0u));
+                        const float ws1 = (float)sycl::bit_cast<sycl::half>(
+                            (uint16_t)(p1 & 0xFFF0u));
+                        acc += (float)(d0 - z0 * sum0) * ws0 * as0;
+                        acc += (float)(d1 - z1 * sum1) * ws1 * as1;
+                    }
+                    for (; kt < kt_end; ++kt) {
                         const uint16_t afrag = *reinterpret_cast<const uint16_t *>(
                             d_q + (size_t)kt * 32 + 2 * lane);
                         const uintv4 bfrag = *reinterpret_cast<const uintv4 *>(
@@ -1113,35 +1143,67 @@ void x_rmsnorm_chunk(float *d_out, const float *d_in, const uint16_t *d_w,
         });
 }
 
+// One subgroup owns a complete quantization block. The staging layout and
+// scalar scale/round/clamp expressions remain unchanged; only max and exact
+// integer-sum reductions move from a work-group to a subgroup.
+template <bool S4>
+static void quantize_act_chunk_subgroup(const float *x, int K, int T,
+                                        uint8_t *aq, float *as, int32_t *asum) {
+    constexpr int width = S4 ? 64 : 32;
+    constexpr int values = width / kSG;
+    constexpr int subgroups = 16;
+    const size_t blocks = (size_t)(K / width) * T;
+    const size_t workgroups = (blocks + subgroups - 1) / subgroups;
+    tq_q().parallel_for(
+        sycl::nd_range<1>(workgroups * subgroups * kSG, subgroups * kSG),
+        [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(kSG)]] {
+            const auto sg = it.get_sub_group();
+            const size_t blk = it.get_group_linear_id() * subgroups +
+                               sg.get_group_linear_id();
+            if (blk >= blocks) return;
+            const int lane = (int)sg.get_local_linear_id();
+            const size_t kt = blk / T, tok = blk % T;
+            float v[values];
+            float mx = -INFINITY;
+            for (int j = 0; j < values; ++j) {
+                v[j] = x[tok * K + kt * width + j * kSG + lane];
+                mx = sycl::fmax(mx, sycl::fabs(v[j]));
+            }
+            mx = sycl::reduce_over_group(sg, mx, sycl::maximum<float>());
+            const float scale = (mx > 0.0f) ? (mx / (S4 ? 7.0f : 127.0f)) : 1.0f;
+            int32_t sum = 0;
+            for (int j = 0; j < values; ++j) {
+                const int32_t q = (int32_t)sycl::clamp(
+                    sycl::rint(v[j] / scale), S4 ? -7.0f : -127.0f,
+                    S4 ? 7.0f : 127.0f);
+                sum += q;
+                if constexpr (S4) {
+                    const int32_t next = sycl::shift_group_left(sg, q, 1);
+                    if ((lane & 1) == 0)
+                        aq[blk * 32 + j * (kSG / 2) + lane / 2] =
+                            (uint8_t)((q & 0xF) | ((next & 0xF) << 4));
+                } else {
+                    aq[blk * 32 + j * kSG + lane] = (uint8_t)(int8_t)q;
+                }
+            }
+            sum = sycl::reduce_over_group(sg, sum, sycl::plus<int32_t>());
+            if (lane == 0) {
+                as[blk] = scale;
+                asum[blk] = sum;
+            }
+        });
+}
+
 // fp32 [T][K] -> the RC8 A layout plus a per-(token, K32) scale and a
 // per-(token, K32) SUM. The sum is stored already reduced over all 32 lanes,
 // not as two K16 halves: the GEMM epilogue runs once per k-tile per output
 // element, so re-adding the halves there cost 8 int adds and a 16-int load per
-// k-tile, against one DPAS's 8 cycles. Reducing across the 32-thread group
-// costs one extra reduction ONCE per block here.
+// k-tile, against one DPAS's 8 cycles. The staging subgroup reduces the full
+// K32 sum once per block before any projection consumes it.
 void x_quantize_act_chunk(const float *d_x, int K, int T, int8_t *d_aq,
                           float *d_as, int32_t *d_asum) {
-    const int Kt = K / 32;
-    tq_q().parallel_for(
-        sycl::nd_range<1>((size_t)Kt * T * 32, 32),
-        [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(kSG)]]
-            {
-            const int blk = (int)it.get_group_linear_id();   // kt * T + token
-            const int kt = blk / T;
-            const int tok = blk - kt * T;
-            const int t = (int)it.get_local_linear_id();
-            const float v = d_x[(size_t)tok * K + kt * 32 + t];
-            const float mx = sycl::reduce_over_group(it.get_group(), sycl::fabs(v),
-                                                     sycl::maximum<float>());
-            const float s = (mx > 0.0f) ? (mx / 127.0f) : 1.0f;
-            const int32_t q =
-                (int32_t)sycl::clamp(sycl::rint(v / s), -127.0f, 127.0f);
-            if (t == 0) d_as[blk] = s;
-            const int32_t gs =
-                sycl::reduce_over_group(it.get_group(), q, sycl::plus<int32_t>());
-            if (t == 0) d_asum[blk] = gs;
-            d_aq[(size_t)blk * 32 + t] = (int8_t)q;
-        });
+    quantize_act_chunk_subgroup<false>(d_x, K, T,
+        reinterpret_cast<uint8_t *>(d_aq), d_as, d_asum);
 }
 
 // Split-K for the batched GEMM. The batched path derives ALL of its
@@ -1190,11 +1252,11 @@ int choose_gemm_splits(int rgroups, int tgroups, int ktiles) {
 // Reuse weights across two independent RC8 token groups. Each
 // output keeps the original serial K order; requests needing split-K stay on
 // their existing kernel.
-template <bool S4>
+template <bool S4, bool Tail = false>
 static int gemm_rc16(const tq_qmma_weight_t *w, const uint8_t *aq,
                       const float *as, const int32_t *asum, float *y, int T) {
     const int M = w->M, kt_count = w->K / (S4 ? 64 : 32);
-    const int tgroups = T / 16;
+    const int tgroups = Tail ? (T + 15) / 16 : T / 16;
     const int tasks = (M / 16) * tgroups;
     const size_t wgs = ((size_t)tasks + kSubgroupsPerWorkgroup - 1) /
                        kSubgroupsPerWorkgroup;
@@ -1236,6 +1298,9 @@ static int gemm_rc16(const tq_qmma_weight_t *w, const uint8_t *aq,
                 const float ws = (float)sycl::bit_cast<sycl::half>(
                     (uint16_t)(packed & 0xFFF0u));
                 for (int p = 0; p < 2; ++p) {
+                    if constexpr (Tail) {
+                        if (tg * 16 + p * 8 >= T) continue;
+                    }
                     const size_t arow = (size_t)kt * T + tg * 16 + p * 8;
                     const uint8_t *ab = aq + arow * 32;
                     uintv4 afrag;
@@ -1255,9 +1320,13 @@ static int gemm_rc16(const tq_qmma_weight_t *w, const uint8_t *aq,
                         acc[p][m] += (float)(d[m] - zp * sumv[m]) * (ws * asv[m]);
                 }
             }
-            for (int p = 0; p < 2; ++p)
+            for (int p = 0; p < 2; ++p) {
+                if constexpr (Tail) {
+                    if (tg * 16 + p * 8 >= T) continue;
+                }
                 for (int m = 0; m < 8; ++m)
                     y[(size_t)(tg * 16 + p * 8 + m) * M + rg * 16 + lane] = acc[p][m];
+            }
         });
     return 0;
 }
@@ -1302,6 +1371,11 @@ int x_gemm_w4a8(const tq_qmma_weight_t *w, const int8_t *d_aq, const float *d_as
     if (splits == 1 && T % 16 == 0)
         return gemm_rc16<false>(w, reinterpret_cast<const uint8_t *>(d_aq),
                                 d_as, d_asum, d_y, T);
+    // Preserve every segment's original split-K eligibility. The last RC8
+    // group is real eight-row work, never a padded request or altered stride.
+    if (splits == 1 && T > 16 && T % 16 == 8)
+        return gemm_rc16<false, true>(w, reinterpret_cast<const uint8_t *>(d_aq),
+                                     d_as, d_asum, d_y, T);
     const int rtiles = rgroups * tgroups;
     const int tasks = rtiles * splits;
     const size_t wgs = ((size_t)tasks + kSubgroupsPerWorkgroup - 1) /
@@ -1420,32 +1494,7 @@ int x_gemm_w4a8(const tq_qmma_weight_t *w, const int8_t *d_aq, const float *d_as
 // integer code SUM per (token, K64) for the weight zero-point correction.
 void x_quantize_act_chunk_s4(const float *d_x, int K, int T, uint8_t *d_aq4,
                              float *d_as4, int32_t *d_asum4) {
-    const int Kt64 = K / 64;
-    tq_q().parallel_for(
-        sycl::nd_range<1>((size_t)Kt64 * T * 64, 64),
-        [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(kSG)]]
-            {
-            const int blk = (int)it.get_group_linear_id();   // kt64 * T + token
-            const int kt = blk / T;
-            const int tok = blk - kt * T;
-            const int t = (int)it.get_local_linear_id();
-            const float v = d_x[(size_t)tok * K + kt * 64 + t];
-            const float mx = sycl::reduce_over_group(it.get_group(), sycl::fabs(v),
-                                                     sycl::maximum<float>());
-            const float s = (mx > 0.0f) ? (mx / 7.0f) : 1.0f;
-            const int32_t q =
-                (int32_t)sycl::clamp(sycl::rint(v / s), -7.0f, 7.0f);
-            if (t == 0) d_as4[blk] = s;
-            const int32_t gs =
-                sycl::reduce_over_group(it.get_group(), q, sycl::plus<int32_t>());
-            if (t == 0) d_asum4[blk] = gs;
-            // Nibble pairs never straddle a subgroup (16 | pair alignment).
-            const int32_t qn =
-                sycl::shift_group_left(it.get_sub_group(), q, 1);
-            if ((t & 1) == 0)
-                d_aq4[(size_t)blk * 32 + (t >> 1)] =
-                    (uint8_t)((q & 0xF) | ((qn & 0xF) << 4));
-        });
+    quantize_act_chunk_subgroup<true>(d_x, K, T, d_aq4, d_as4, d_asum4);
 }
 
 // Batched W4A4 GEMM: the same task grid and epilogue shape as x_gemm_w4a8,
@@ -1458,20 +1507,22 @@ int x_gemm_w4a4(const tq_qmma_weight_t *w, const uint8_t *d_aq4,
     if (!d_aq4 || !d_as4 || !d_asum4 || !d_y || T <= 0 || (T % 8) != 0) return -2;
     if (T % 16 == 0)
         return gemm_rc16<true>(w, d_aq4, d_as4, d_asum4, d_y, T);
+    if (T > 16 && T % 16 == 8)
+        return gemm_rc16<true, true>(w, d_aq4, d_as4, d_asum4, d_y, T);
     const int M = w->M, K = w->K, Kt64 = K / 64;
     const int rgroups = M / 16, tgroups = T / 8;
     const int tasks = rgroups * tgroups;
-    const size_t wgs = ((size_t)tasks + kSubgroupsPerWorkgroup - 1) /
-                       kSubgroupsPerWorkgroup;
+    // Only the eight-row shape remains after the full and tailed RC16 paths.
+    constexpr int nsg = 2;
+    const size_t wgs = ((size_t)tasks + nsg - 1) / nsg;
     const uint8_t *codes = w->d_s4;
     const uint16_t *scales = w->d_s4_scale;
     tq_q().parallel_for(
-        sycl::nd_range<1>(wgs * kSG * kSubgroupsPerWorkgroup,
-                          kSG * kSubgroupsPerWorkgroup),
+        sycl::nd_range<1>(wgs * kSG * nsg, kSG * nsg),
         [=](sycl::nd_item<1> it) [[sycl::reqd_sub_group_size(kSG)]]
             {
             const auto sg = it.get_sub_group();
-            const int task = (int)it.get_group_linear_id() * kSubgroupsPerWorkgroup +
+            const int task = (int)it.get_group_linear_id() * nsg +
                              (int)sg.get_group_linear_id();
             if (task >= tasks) return;
             const int rg = task / tgroups;

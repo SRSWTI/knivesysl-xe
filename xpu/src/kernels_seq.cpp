@@ -126,7 +126,7 @@ enum tq_attn_branch_t {
 std::atomic<unsigned long long> g_attn_branch_counts[TQ_ATTN_BRANCH_COUNT];
 
 // Lazily grown per-(head, segment) attention partials for the grouped path:
-// [head][segment][hd + 2], the trailing two slots carrying that segment's
+// [batch row][head][segment][hd + 2], the trailing two slots carrying that segment's
 // online-softmax max and denominator.
 float *g_attn_part = nullptr;
 size_t g_attn_part_cap = 0;
@@ -140,7 +140,7 @@ void ensure_attn_partials(size_t elements) {
 }
 
 // Pre-packed bf16 Q A-fragments for the DPAS attention path (design 9.5):
-// [nkv][16 k-chunks][64 dwords] - 8 rows (6 live GQA heads + 2 zero) per
+// [batch row][nkv][16 k-chunks][64 dwords] - 8 rows (6 live GQA heads + 2 zero) per
 // chunk in the verified apair/abyte layout.
 uint32_t *g_attn_qfrag = nullptr;
 size_t g_attn_qfrag_cap = 0;
@@ -236,15 +236,25 @@ extern "C" int qwn_e4m3_selftest(void) {
     return (bad[0] == 0 && bad[1] == 0) ? 0 : -1;
 }
 
-void x_linear_conv_update(float *d_out, float *d_state, const float *d_x,
-                          const uint16_t *d_conv_w, int conv_dim, int ks) {
+template<int N> struct LinearDecodeRows {
+    tq_linear_decode_row rows[N];
+};
+
+template<int N>
+static void linear_conv_update_grid(const LinearDecodeRows<N> &batch, int n,
+                                    const uint16_t *d_conv_w, int conv_dim, int ks) {
     constexpr size_t local_size = 256;
     const size_t global_size =
         ((static_cast<size_t>(conv_dim) + local_size - 1) / local_size) * local_size;
 
-    tq_q().parallel_for(sycl::nd_range<1>(global_size, local_size),
+    tq_q().parallel_for(sycl::nd_range<1>(global_size * n, local_size),
                         [=](sycl::nd_item<1> item) {
-        const int channel = static_cast<int>(item.get_global_linear_id());
+        const size_t gid = item.get_global_linear_id();
+        const int row = N == 1 ? 0 : (int)(gid / global_size);
+        const int channel = N == 1 ? (int)gid : (int)(gid % global_size);
+        float *d_out = batch.rows[row].conv_out;
+        float *d_state = batch.rows[row].conv_state;
+        const float *d_x = batch.rows[row].conv_in;
         if (channel >= conv_dim) return;
 
         float sum = 0.0f;
@@ -264,6 +274,25 @@ void x_linear_conv_update(float *d_out, float *d_state, const float *d_x,
         // SiLU(sum); the kernel has no unswished channel range.
         d_out[channel] = sum / (1.0f + sycl::exp(-sum));
     });
+}
+
+void x_linear_conv_update(float *d_out, float *d_state, const float *d_x,
+                          const uint16_t *d_conv_w, int conv_dim, int ks) {
+    const LinearDecodeRows<1> batch{{{d_out, d_state, d_x}}};
+    linear_conv_update_grid(batch, 1, d_conv_w, conv_dim, ks);
+}
+
+int x_linear_conv_update_batch(const tq_linear_decode_row *rows, int n,
+                               const uint16_t *d_conv_w, int conv_dim, int ks) {
+    if (!rows || n < 1 || n > TQ_LINEAR_DECODE_MAX_ROWS || !d_conv_w ||
+        conv_dim < 1 || ks < 1) return -1;
+    LinearDecodeRows<TQ_LINEAR_DECODE_MAX_ROWS> batch{};
+    for (int i = 0; i < n; ++i) {
+        if (!rows[i].conv_out || !rows[i].conv_state || !rows[i].conv_in) return -1;
+        batch.rows[i] = rows[i];
+    }
+    linear_conv_update_grid(batch, n, d_conv_w, conv_dim, ks);
+    return 0;
 }
 
 // Chunk-parallel causal depthwise conv + SiLU over T tokens (design 9.2).
@@ -347,11 +376,44 @@ int x_deltanet_chunk(float *d_core_out, float *d_recurrent,
                      const float *d_conv_out, const float *d_z,
                      const float *d_b, const float *d_a, const float *d_A_log,
                      const uint16_t *d_dt_bias, const float *d_norm_w, int T,
-                     int nk, int dk, int nv, int dv, float eps) {
+                     int nk, int dk, int nv, int dv, float eps,
+                     float *d_qk_factors, size_t qk_factor_capacity) {
     if (dk != 128 || dv != 128 || nk <= 0 || nv <= 0 || (nv % nk) != 0)
         return -1;
     constexpr int CK = 8;
     constexpr int D = 128;
+    // Offset neighboring token rows without changing any contraction order.
+    constexpr int QK_STRIDE = D + 1;
+    if (T < 0) return -1;
+    const size_t factor_pairs = (size_t)T * nk;
+    if (factor_pairs > 0) {
+        if (!d_qk_factors || qk_factor_capacity < 2 * factor_pairs) return -1;
+        // One complete serial norm recurrence per token/key head, shared by
+        // its value heads. The in-order queue publishes factors before GDN.
+        tq_q().submit([&](sycl::handler &cgh) {
+            cgh.parallel_for(
+                sycl::nd_range<1>((factor_pairs + 127) / 128 * 128, 128),
+                [=](sycl::nd_item<1> item) {
+                    const size_t index = item.get_global_linear_id();
+                    if (index >= factor_pairs) return;
+                    const int t = (int)(index / nk);
+                    const int key_head = (int)(index % nk);
+                    const int key_dim = nk * D;
+                    const int conv_dim = 2 * key_dim + nv * D;
+                    const float *q = d_conv_out + (size_t)t * conv_dim +
+                                     (size_t)key_head * D;
+                    const float *k = q + key_dim;
+                    float qss = 0.0f, kss = 0.0f;
+                    for (int d = 0; d < D; ++d) {
+                        qss += q[d] * q[d];
+                        kss += k[d] * k[d];
+                    }
+                    d_qk_factors[2 * index] = sycl::rsqrt(qss + 1.0e-6f) *
+                                               sycl::rsqrt((float)D);
+                    d_qk_factors[2 * index + 1] = sycl::rsqrt(kss + 1.0e-6f);
+                });
+        });
+    }
     // v2 shape (v1 postmortem: 48 WGs x 128 threads = 19% occupancy ran
     // SLOWER than the serial loop, 367 vs 464 tok/s live). This version
     // mirrors x_linear_decode_core_gated_fast's proven layout: one
@@ -363,8 +425,8 @@ int x_deltanet_chunk(float *d_core_out, float *d_recurrent,
     constexpr int G = 8;
     constexpr int kPer = D / G;                    // 16 state rows per thread
     tq_q().submit([&](sycl::handler &cgh) {
-        sycl::local_accessor<float, 1> kn_sh(sycl::range<1>(CK * D), cgh);
-        sycl::local_accessor<float, 1> qn_sh(sycl::range<1>(CK * D), cgh);
+        sycl::local_accessor<float, 1> kn_sh(sycl::range<1>(CK * QK_STRIDE), cgh);
+        sycl::local_accessor<float, 1> qn_sh(sycl::range<1>(CK * QK_STRIDE), cgh);
         sycl::local_accessor<float, 1> psum(sycl::range<1>(G * CK * D), cgh);
         sycl::local_accessor<float, 1> Dl_sh(sycl::range<1>(CK * D), cgh);
         sycl::local_accessor<float, 1> Lmat(sycl::range<1>(CK * CK), cgh);
@@ -399,17 +461,9 @@ int x_deltanet_chunk(float *d_core_out, float *d_recurrent,
                     // 1a: per-token q/k inverse-L2 factors (thread j = token).
                     if (tid < L) {
                         const int t = s + tid;
-                        const float *q = d_conv_out + (size_t)t * conv_dim +
-                                         (size_t)key_head * D;
-                        const float *k = q + key_dim;
-                        float qss = 0.0f, kss = 0.0f;
-                        for (int d = 0; d < D; ++d) {
-                            qss += q[d] * q[d];
-                            kss += k[d] * k[d];
-                        }
-                        qfac[tid] = sycl::rsqrt(qss + 1.0e-6f) *
-                                    sycl::rsqrt((float)D);
-                        kfac[tid] = sycl::rsqrt(kss + 1.0e-6f);
+                        const size_t factor_index = 2 * ((size_t)t * nk + key_head);
+                        qfac[tid] = d_qk_factors[factor_index];
+                        kfac[tid] = d_qk_factors[factor_index + 1];
                         const float bb = d_b[(size_t)t * nv + head];
                         const float sp_arg = d_a[(size_t)t * nv + head] + dtb;
                         const float sp =
@@ -425,8 +479,8 @@ int x_deltanet_chunk(float *d_core_out, float *d_recurrent,
                         const int t = s + ch;
                         const float *q = d_conv_out + (size_t)t * conv_dim +
                                          (size_t)key_head * D;
-                        qn_sh[ch * D + c] = q[c] * qfac[ch];
-                        kn_sh[ch * D + c] = q[key_dim + c] * kfac[ch];
+                        qn_sh[ch * QK_STRIDE + c] = q[c] * qfac[ch];
+                        kn_sh[ch * QK_STRIDE + c] = q[key_dim + c] * kfac[ch];
                     }
                     // Preserve serial cumulative addition; share exponentials
                     // across all value columns and contraction stripes.
@@ -449,9 +503,9 @@ int x_deltanet_chunk(float *d_core_out, float *d_recurrent,
                         if (m <= j) {
                             float dkk = 0.0f, dqk = 0.0f;
                             for (int d = 0; d < D; ++d) {
-                                const float knm = kn_sh[m * D + d];
-                                dkk += kn_sh[j * D + d] * knm;
-                                dqk += qn_sh[j * D + d] * knm;
+                                const float knm = kn_sh[m * QK_STRIDE + d];
+                                dkk += kn_sh[j * QK_STRIDE + d] * knm;
+                                dqk += qn_sh[j * QK_STRIDE + d] * knm;
                             }
                             const float decay = sycl::exp(la_sh[j] - la_sh[m]);
                             lower = (m < j) ? beta_sh[j] * decay * dkk : 0.0f;
@@ -465,7 +519,7 @@ int x_deltanet_chunk(float *d_core_out, float *d_recurrent,
                     for (int j = 0; j < L; ++j) {
                         float pk = 0.0f;
                         for (int k = 0; k < kPer; ++k)
-                            pk += kn_sh[j * D + kk0 + k] * st[k];
+                            pk += kn_sh[j * QK_STRIDE + kk0 + k] * st[k];
                         psum[((size_t)ch * CK + j) * D + c] = pk;
                     }
                     item.barrier(sycl::access::fence_space::local_space);
@@ -482,7 +536,7 @@ int x_deltanet_chunk(float *d_core_out, float *d_recurrent,
                     for (int j = 0; j < L; ++j) {
                         float pq = 0.0f;
                         for (int k = 0; k < kPer; ++k)
-                            pq += qn_sh[j * D + kk0 + k] * st[k];
+                            pq += qn_sh[j * QK_STRIDE + kk0 + k] * st[k];
                         psum[((size_t)ch * CK + j) * D + c] = pq;
                     }
                     item.barrier(sycl::access::fence_space::local_space);
@@ -542,7 +596,7 @@ int x_deltanet_chunk(float *d_core_out, float *d_recurrent,
                     for (int k = 0; k < kPer; ++k) {
                         float acc = gamma_last * st[k];
                         for (int i = 0; i < L; ++i)
-                            acc += dec[i] * kn_sh[i * D + kk0 + k];
+                            acc += dec[i] * kn_sh[i * QK_STRIDE + kk0 + k];
                         st[k] = acc;
                     }
                     item.barrier(sycl::access::fence_space::local_space);
@@ -571,13 +625,12 @@ int x_deltanet_chunk(float *d_core_out, float *d_recurrent,
 //          = decay * sum_k S_old[k][c] * qn[k] + delta_c * sum_k kn[k] * qn[k]
 // where the last factor is a per-head scalar. Same arithmetic, reassociated:
 // eps-level drift, gated by the usual TF/parity harness.
-void x_linear_decode_core_gated_fast(float *d_out, float *d_recurrent,
-                                     const float *d_conv_out, const float *d_z,
-                                     const float *d_b, const float *d_a,
-                                     const float *d_A_log,
-                                     const uint16_t *d_dt_bias,
-                                     const float *d_norm_w,
-                                     int nk, int dk, int nv, int dv, float eps) {
+template<int N>
+static void linear_decode_core_fast_grid(const LinearDecodeRows<N> &batch, int n,
+                                         const float *d_A_log,
+                                         const uint16_t *d_dt_bias,
+                                         const float *d_norm_w,
+                                         int nk, int dk, int nv, int dv, float eps) {
     constexpr int kDim = 128;
     constexpr int kChunks = 8;
     constexpr int kPerChunk = kDim / kChunks;         // 16 state rows per thread
@@ -592,9 +645,17 @@ void x_linear_decode_core_gated_fast(float *d_out, float *d_recurrent,
         sycl::local_accessor<float, 1> sk(sycl::range<1>(kDim), cgh);
 
         cgh.parallel_for(
-            sycl::nd_range<1>((size_t)nv * kLocal, kLocal),
+            sycl::nd_range<1>((size_t)n * nv * kLocal, kLocal),
             [=](sycl::nd_item<1> item) {
-                const int head = (int)item.get_group_linear_id();
+                const int gid = (int)item.get_group_linear_id();
+                const int row = N == 1 ? 0 : gid / nv;
+                const int head = N == 1 ? gid : gid % nv;
+                float *d_out = batch.rows[row].core_out;
+                float *d_recurrent = batch.rows[row].recurrent;
+                const float *d_conv_out = batch.rows[row].conv_out;
+                const float *d_z = batch.rows[row].z;
+                const float *d_b = batch.rows[row].b;
+                const float *d_a = batch.rows[row].a;
                 const int tid = (int)item.get_local_linear_id();
                 const int c = tid % kDim;             // dv column
                 const int ch = tid / kDim;            // dk chunk
@@ -687,25 +748,14 @@ void x_linear_decode_core_gated_fast(float *d_out, float *d_recurrent,
     });
 }
 
-void x_linear_decode_core_gated(float *d_out, float *d_recurrent,
-                                const float *d_conv_out, const float *d_z,
-                                const float *d_b, const float *d_a,
-                                const float *d_A_log, const uint16_t *d_dt_bias,
-                                const float *d_norm_w,
-                                int nk, int dk, int nv, int dv, float eps) {
-    // Shipping shape takes the full-occupancy single-read-pass kernel.
-    // TQ_XPU_DELTA_FAST=0 reverts to the generic reference below.
-    if (dk == 128 && dv == 128 && nk > 0 && nv > 0 && (nv % nk) == 0) {
-        const char *e = std::getenv("TQ_XPU_DELTA_FAST");
-        if (!e || e[0] != '0') {
-            x_linear_decode_core_gated_fast(d_out, d_recurrent, d_conv_out, d_z,
-                                            d_b, d_a, d_A_log, d_dt_bias,
-                                            d_norm_w, nk, dk, nv, dv, eps);
-            return;
-        }
-    }
+template<int N>
+static void linear_decode_core_generic_grid(const LinearDecodeRows<N> &batch, int n,
+                                            const float *d_A_log,
+                                            const uint16_t *d_dt_bias,
+                                            const float *d_norm_w,
+                                            int nk, int dk, int nv, int dv, float eps) {
     const size_t local_size = static_cast<size_t>(dv);
-    const size_t global_size = static_cast<size_t>(nv) * local_size;
+    const size_t global_size = static_cast<size_t>(n) * nv * local_size;
 
     tq_q().submit([&](sycl::handler &cgh) {
         sycl::local_accessor<float, 1> qn(sycl::range<1>(static_cast<size_t>(dk)), cgh);
@@ -713,7 +763,15 @@ void x_linear_decode_core_gated(float *d_out, float *d_recurrent,
 
         cgh.parallel_for(sycl::nd_range<1>(global_size, local_size),
                          [=](sycl::nd_item<1> item) {
-            const int head = static_cast<int>(item.get_group_linear_id());
+            const int gid = static_cast<int>(item.get_group_linear_id());
+            const int row = N == 1 ? 0 : gid / nv;
+            const int head = N == 1 ? gid : gid % nv;
+            float *d_out = batch.rows[row].core_out;
+            float *d_recurrent = batch.rows[row].recurrent;
+            const float *d_conv_out = batch.rows[row].conv_out;
+            const float *d_z = batch.rows[row].z;
+            const float *d_b = batch.rows[row].b;
+            const float *d_a = batch.rows[row].a;
             const int tid = static_cast<int>(item.get_local_linear_id());
 
             // CUDA lines 8215-8221: value heads share q/k by GQA grouping.
@@ -790,6 +848,69 @@ void x_linear_decode_core_gated(float *d_out, float *d_recurrent,
                 normed * (gate / (1.0f + sycl::exp(-gate)));
         });
     });
+}
+
+template<int N>
+static void linear_decode_core_grid(const LinearDecodeRows<N> &batch, int n,
+                                    const float *d_A_log,
+                                    const uint16_t *d_dt_bias,
+                                    const float *d_norm_w,
+                                    int nk, int dk, int nv, int dv, float eps) {
+    // Preserve single-row fast-shape selection and the explicit reference mode.
+    if (dk == 128 && dv == 128 && nk > 0 && nv > 0 && (nv % nk) == 0) {
+        const char *e = std::getenv("TQ_XPU_DELTA_FAST");
+        if (!e || e[0] != '0') {
+            linear_decode_core_fast_grid(batch, n, d_A_log, d_dt_bias,
+                                        d_norm_w, nk, dk, nv, dv, eps);
+            return;
+        }
+    }
+    linear_decode_core_generic_grid(batch, n, d_A_log, d_dt_bias,
+                                   d_norm_w, nk, dk, nv, dv, eps);
+}
+
+void x_linear_decode_core_gated_fast(float *d_out, float *d_recurrent,
+                                     const float *d_conv_out, const float *d_z,
+                                     const float *d_b, const float *d_a,
+                                     const float *d_A_log,
+                                     const uint16_t *d_dt_bias,
+                                     const float *d_norm_w,
+                                     int nk, int dk, int nv, int dv, float eps) {
+    const LinearDecodeRows<1> batch{{{const_cast<float *>(d_conv_out), nullptr,
+        nullptr, d_out, d_recurrent, d_z, d_b, d_a}}};
+    linear_decode_core_fast_grid(batch, 1, d_A_log, d_dt_bias,
+                                d_norm_w, nk, dk, nv, dv, eps);
+}
+
+void x_linear_decode_core_gated(float *d_out, float *d_recurrent,
+                                const float *d_conv_out, const float *d_z,
+                                const float *d_b, const float *d_a,
+                                const float *d_A_log, const uint16_t *d_dt_bias,
+                                const float *d_norm_w,
+                                int nk, int dk, int nv, int dv, float eps) {
+    const LinearDecodeRows<1> batch{{{const_cast<float *>(d_conv_out), nullptr,
+        nullptr, d_out, d_recurrent, d_z, d_b, d_a}}};
+    linear_decode_core_grid(batch, 1, d_A_log, d_dt_bias,
+                           d_norm_w, nk, dk, nv, dv, eps);
+}
+
+int x_linear_decode_core_gated_batch(const tq_linear_decode_row *rows, int n,
+                                     const float *d_A_log,
+                                     const uint16_t *d_dt_bias,
+                                     const float *d_norm_w,
+                                     int nk, int dk, int nv, int dv, float eps) {
+    if (!rows || n < 1 || n > TQ_LINEAR_DECODE_MAX_ROWS || !d_A_log ||
+        !d_dt_bias || !d_norm_w || nk < 1 || dk < 1 || nv < 1 || dv < 1 ||
+        (nv % nk) != 0) return -1;
+    LinearDecodeRows<TQ_LINEAR_DECODE_MAX_ROWS> batch{};
+    for (int i = 0; i < n; ++i) {
+        if (!rows[i].conv_out || !rows[i].core_out || !rows[i].recurrent ||
+            !rows[i].z || !rows[i].b || !rows[i].a) return -1;
+        batch.rows[i] = rows[i];
+    }
+    linear_decode_core_grid(batch, n, d_A_log, d_dt_bias,
+                           d_norm_w, nk, dk, nv, dv, eps);
+    return 0;
 }
 
 // ===== wide prefill: batched KV write + query-tiled causal flash attention =====
@@ -1146,14 +1267,72 @@ void x_prefill_attn_packed(const tq_prefill_attn_request_t *requests, int n,
     }
 }
 
-template <bool Paged>
+namespace {
+
+template <int Rows>
+struct tq_attn_decode_rows_t {
+    tq_decode_attn_request_t rows[Rows];
+};
+
+// Keep the single-request instantiation's original one-dimensional grid.
+// In a batch, the first dimension selects a row and never joins a reduction.
+template <int Rows>
+auto tq_attn_decode_grid(int n, size_t global, size_t local) {
+    if constexpr (Rows == 1) {
+        return sycl::nd_range<1>(global, local);
+    } else {
+        return sycl::nd_range<2>(sycl::range<2>(n, global),
+                                 sycl::range<2>(1, local));
+    }
+}
+
+template <int Rows>
+auto tq_attn_decode_range(int n, size_t global) {
+    if constexpr (Rows == 1) {
+        return sycl::range<1>(global);
+    } else {
+        return sycl::range<2>(n, global);
+    }
+}
+
+template <int Dim>
+inline size_t tq_attn_decode_row(sycl::nd_item<Dim> item) {
+    if constexpr (Dim == 1) return 0;
+    else return item.get_group(0);
+}
+
+template <int Dim>
+inline size_t tq_attn_decode_row(sycl::id<Dim> id) {
+    if constexpr (Dim == 1) return 0;
+    else return id[0];
+}
+
+tq_attn_branch_t tq_attn_decode_branch(int pos, int nh, int nkv, int hd) {
+    const char *simd16 = std::getenv("TQ_XPU_ATTN_SIMD16");
+    if (hd != 256 || (simd16 && simd16[0] == '0'))
+        return TQ_ATTN_BRANCH_GENERIC;
+    const char *dpas = std::getenv("TQ_XPU_ATTN_DPAS");
+    if (dpas && dpas[0] == '1' && pos >= 512 && nh / nkv == 6 &&
+        (nh % nkv) == 0)
+        return TQ_ATTN_BRANCH_SIMD16_DPAS;
+    const char *grouped = std::getenv("TQ_XPU_ATTN_GROUPED");
+    if (pos >= 512 && (!grouped || grouped[0] != '0') &&
+        ((nh / nkv) % TQ_ATTN_G) == 0 && (nh % TQ_ATTN_G) == 0)
+        return TQ_ATTN_BRANCH_SIMD16_GROUPED;
+    return pos >= 64 ? TQ_ATTN_BRANCH_SIMD16_SHARDED
+                     : TQ_ATTN_BRANCH_SIMD16_SHORT;
+}
+
+}  // namespace
+
+template <bool Paged, int Rows>
 void x_full_attn_decode_impl(
-    float *d_out, const float *d_qg_proj, const float *d_k_proj,
-    const float *d_v_proj, const uint16_t *d_q_norm,
-    const uint16_t *d_k_norm, uint8_t *d_k_cache, uint8_t *d_v_cache,
-    uint16_t *d_k_scale, uint16_t *d_v_scale, float *d_scores, int pos,
+    tq_attn_decode_rows_t<Rows> batch, int n,
+    const uint16_t *d_q_norm, const uint16_t *d_k_norm,
     int nh, int nkv, int hd, float eps, float rope_theta,
-    float partial_rotary_factor, int sstride, tq_kv_layout_t layout) {
+    float partial_rotary_factor, int sstride, tq_attn_branch_t branch) {
+    constexpr int kGridDim = Rows == 1 ? 1 : 2;
+    const int pos = batch.rows[0].pos;
     const size_t local_size = static_cast<size_t>(hd);
 
     // CUDA line 12145 hardcodes 64 for the shipping hd=256, prf=0.25 model.
@@ -1165,17 +1344,26 @@ void x_full_attn_decode_impl(
     // keeps 16 Q/output elements in registers, so the online softmax needs no
     // work-group barriers or local memory. The former 256-thread path reduced
     // across 16 subgroups and rendezvoused all 256 threads once per token.
-    const char *simd16 = std::getenv("TQ_XPU_ATTN_SIMD16");
-    if (hd == 256 && (!simd16 || simd16[0] != '0')) {
+    if (branch != TQ_ATTN_BRANCH_GENERIC) {
         constexpr int kHeadDim = 256;
         constexpr int kSubgroup = 16;
         constexpr int kLaneValues = kHeadDim / kSubgroup;
 
         tq_q().parallel_for(
-            sycl::nd_range<1>(static_cast<size_t>(nkv) * kSubgroup, kSubgroup),
-            [=](sycl::nd_item<1> item)
+            tq_attn_decode_grid<Rows>(n, static_cast<size_t>(nkv) * kSubgroup, kSubgroup),
+            [=](sycl::nd_item<kGridDim> item)
                 [[sycl::reqd_sub_group_size(kSubgroup)]] {
-                const int kv_head = static_cast<int>(item.get_group_linear_id());
+                const size_t batch_row = tq_attn_decode_row(item);
+                const auto &request = batch.rows[batch_row];
+                const float *d_k_proj = request.k;
+                const float *d_v_proj = request.v;
+                uint8_t *d_k_cache = request.kc;
+                uint8_t *d_v_cache = request.vc;
+                uint16_t *d_k_scale = request.ks;
+                uint16_t *d_v_scale = request.vs;
+                const int pos = request.pos;
+                const tq_kv_layout_t layout = request.layout;
+                const int kv_head = static_cast<int>(item.get_group(kGridDim - 1));
                 const sycl::sub_group sg = item.get_sub_group();
                 const int lane = static_cast<int>(sg.get_local_linear_id());
                 const size_t base = static_cast<size_t>(kv_head) * kHeadDim;
@@ -1250,28 +1438,33 @@ void x_full_attn_decode_impl(
         // Emits the same (O, max, den) partials the grouped merge consumes,
         // with a runtime segment count. Formulation certified end to end by
         // xpu/probe/dpas_attn_probe.cpp arm C (cos 0.999989 vs fp64 ref).
-        const char *dpas_env = std::getenv("TQ_XPU_ATTN_DPAS");
-        if (dpas_env && dpas_env[0] == '1' && pos >= 512 &&
-            nh / nkv == 6 && (nh % nkv) == 0 && kHeadDim == 256) {
+        if (branch == TQ_ATTN_BRANCH_SIMD16_DPAS) {
             g_attn_branch_counts[TQ_ATTN_BRANCH_SIMD16_DPAS].fetch_add(
-                1, std::memory_order_relaxed);
+                n, std::memory_order_relaxed);
             const int gqa6 = 6;
             const int ntiles = (pos + 1 + kSubgroup - 1) / kSubgroup;
             const int nseg = ntiles < 32 ? ntiles : 32;
             const size_t part_stride = static_cast<size_t>(kHeadDim) + 2;
-            ensure_attn_partials(static_cast<size_t>(nh) * nseg * part_stride);
-            ensure_attn_qfrag(static_cast<size_t>(nkv) * 16 * 64);
-            float *part = g_attn_part;
-            uint32_t *qfrag = g_attn_qfrag;
+            const size_t part_row_stride = static_cast<size_t>(nh) * nseg * part_stride;
+            ensure_attn_partials(static_cast<size_t>(n) * part_row_stride);
+            const size_t qfrag_row_stride = static_cast<size_t>(nkv) * 16 * 64;
+            ensure_attn_qfrag(static_cast<size_t>(n) * qfrag_row_stride);
+            float *part_base = g_attn_part;
+            uint32_t *qfrag_base = g_attn_qfrag;
 
             // Q prep: RMSNorm + q-norm + RoPE per head, packed as bf16
             // A-fragments (chunk c = dims [16c,16c+16), 8 rows x 32 B).
             tq_q().parallel_for(
-                sycl::nd_range<1>(static_cast<size_t>(nh) * kSubgroup,
+                tq_attn_decode_grid<Rows>(n, static_cast<size_t>(nh) * kSubgroup,
                                   kSubgroup),
-                [=](sycl::nd_item<1> item)
+                [=](sycl::nd_item<kGridDim> item)
                     [[sycl::reqd_sub_group_size(kSubgroup)]] {
-                    const int head = static_cast<int>(item.get_group_linear_id());
+                    const size_t batch_row = tq_attn_decode_row(item);
+                    const auto &request = batch.rows[batch_row];
+                    const float *d_qg_proj = request.qg;
+                    const int pos = request.pos;
+                    uint32_t *qfrag = qfrag_base + batch_row * qfrag_row_stride;
+                    const int head = static_cast<int>(item.get_group(kGridDim - 1));
                     const int lane = static_cast<int>(
                         item.get_sub_group().get_local_linear_id());
                     const sycl::sub_group sg = item.get_sub_group();
@@ -1336,13 +1529,23 @@ void x_full_attn_decode_impl(
                 sycl::local_accessor<uint16_t, 1> p_slm(
                     sycl::range<1>(8 * kSubgroup), cgh);
                 cgh.parallel_for(
-                    sycl::nd_range<1>(
+                    tq_attn_decode_grid<Rows>(n,
                         static_cast<size_t>(nkv) * nseg * kSubgroup,
                         kSubgroup),
-                    [=](sycl::nd_item<1> item)
+                    [=](sycl::nd_item<kGridDim> item)
                         [[sycl::reqd_sub_group_size(kSubgroup)]] {
+                        const size_t batch_row = tq_attn_decode_row(item);
+                        const auto &request = batch.rows[batch_row];
+                        uint8_t *d_k_cache = request.kc;
+                        uint8_t *d_v_cache = request.vc;
+                        uint16_t *d_k_scale = request.ks;
+                        uint16_t *d_v_scale = request.vs;
+                        const int pos = request.pos;
+                        const tq_kv_layout_t layout = request.layout;
+                        float *part = part_base + batch_row * part_row_stride;
+                        uint32_t *qfrag = qfrag_base + batch_row * qfrag_row_stride;
                         const int wg =
-                            static_cast<int>(item.get_group_linear_id());
+                            static_cast<int>(item.get_group(kGridDim - 1));
                         const int kv = wg / nseg;
                         const int seg = wg - kv * nseg;
                         const sycl::sub_group sg = item.get_sub_group();
@@ -1511,9 +1714,14 @@ void x_full_attn_decode_impl(
 
             // Cross-segment merge + sigmoid gate (runtime segment count).
             tq_q().parallel_for(
-                sycl::range<1>(static_cast<size_t>(nh) * kHeadDim),
-                [=](sycl::id<1> id) {
-                    const int idx = static_cast<int>(id[0]);
+                tq_attn_decode_range<Rows>(n, static_cast<size_t>(nh) * kHeadDim),
+                [=](sycl::id<kGridDim> id) {
+                    const size_t batch_row = tq_attn_decode_row(id);
+                    const auto &request = batch.rows[batch_row];
+                    float *d_out = request.out;
+                    const float *d_qg_proj = request.qg;
+                    float *part = part_base + batch_row * part_row_stride;
+                    const int idx = static_cast<int>(id[kGridDim - 1]);
                     const int head = idx / kHeadDim;
                     const int d = idx % kHeadDim;
                     const float *base = part +
@@ -1557,7 +1765,6 @@ void x_full_attn_decode_impl(
         // cross-segment merge kernel outweighs the traffic saved on a short
         // history. Break-even lands near pos 375, so gate at 512 and let
         // shallow contexts fall through to the per-head shard kernel.
-        const char *grouped_env = std::getenv("TQ_XPU_ATTN_GROUPED");
         const int gqa_group = nh / nkv;
         // TQ_ATTN_G: heads sharing one work-group's K/V fetch. 3 fits the
         // 128-register mode; 6 (the full GQA group) needs GRF256 — build the
@@ -1569,27 +1776,36 @@ void x_full_attn_decode_impl(
         // did memory-level parallelism. Same grid, half the passes, is the
         // shape that can win.
         constexpr int kSegments = (kHeadsPerWg >= 6) ? 6 : 3;
-        constexpr int kGroupedMinPos = 512;
-        if (pos >= kGroupedMinPos && (!grouped_env || grouped_env[0] != '0') &&
-            (gqa_group % kHeadsPerWg) == 0 && (nh % kHeadsPerWg) == 0) {
+        if (branch == TQ_ATTN_BRANCH_SIMD16_GROUPED) {
             g_attn_branch_counts[TQ_ATTN_BRANCH_SIMD16_GROUPED].fetch_add(
-                1, std::memory_order_relaxed);
+                n, std::memory_order_relaxed);
             constexpr int kShards = kHeadDim / kSubgroup;   // 16 subgroups
             constexpr int kWorkgroup = kHeadDim;            // 256 threads
             const int triplets = nh / kHeadsPerWg;
             const int stride_tok = kSegments * kShards;
             const size_t part_stride = static_cast<size_t>(kHeadDim) + 2;
-            ensure_attn_partials(static_cast<size_t>(nh) * kSegments * part_stride);
-            float *part = g_attn_part;
+            const size_t part_row_stride = static_cast<size_t>(nh) * kSegments * part_stride;
+            ensure_attn_partials(static_cast<size_t>(n) * part_row_stride);
+            float *part_base = g_attn_part;
 
             tq_q().submit([&](sycl::handler &cgh) {
                 sycl::local_accessor<float, 1> smax(kShards * kHeadsPerWg, cgh);
                 sycl::local_accessor<float, 1> sden(kShards * kHeadsPerWg, cgh);
                 sycl::local_accessor<float, 1> sacc(kShards * kHeadDim, cgh);
                 auto kern =
-                    [=](sycl::nd_item<1> item)
+                    [=](sycl::nd_item<kGridDim> item)
                         [[sycl::reqd_sub_group_size(kSubgroup)]] {
-                        const int wg = static_cast<int>(item.get_group_linear_id());
+                        const size_t batch_row = tq_attn_decode_row(item);
+                        const auto &request = batch.rows[batch_row];
+                        const float *d_qg_proj = request.qg;
+                        uint8_t *d_k_cache = request.kc;
+                        uint8_t *d_v_cache = request.vc;
+                        uint16_t *d_k_scale = request.ks;
+                        uint16_t *d_v_scale = request.vs;
+                        const int pos = request.pos;
+                        const tq_kv_layout_t layout = request.layout;
+                        float *part = part_base + batch_row * part_row_stride;
+                        const int wg = static_cast<int>(item.get_group(kGridDim - 1));
                         const int triplet = wg / kSegments;
                         const int seg = wg % kSegments;
                         const int local = static_cast<int>(item.get_local_linear_id());
@@ -1753,7 +1969,7 @@ void x_full_attn_decode_impl(
                             item.barrier(sycl::access::fence_space::local_space);
                         }
                     };
-                const sycl::nd_range<1> grid(
+                const auto grid = tq_attn_decode_grid<Rows>(n,
                     static_cast<size_t>(triplets) * kSegments * kWorkgroup,
                     kWorkgroup);
 #if TQ_ATTN_G >= 6
@@ -1769,9 +1985,14 @@ void x_full_attn_decode_impl(
 
             // Cross-segment merge plus the model's elementwise sigmoid gate.
             tq_q().parallel_for(
-                sycl::range<1>(static_cast<size_t>(nh) * kHeadDim),
-                [=](sycl::id<1> id) {
-                    const int idx = static_cast<int>(id[0]);
+                tq_attn_decode_range<Rows>(n, static_cast<size_t>(nh) * kHeadDim),
+                [=](sycl::id<kGridDim> id) {
+                    const size_t batch_row = tq_attn_decode_row(id);
+                    const auto &request = batch.rows[batch_row];
+                    float *d_out = request.out;
+                    const float *d_qg_proj = request.qg;
+                    float *part = part_base + batch_row * part_row_stride;
+                    const int idx = static_cast<int>(id[kGridDim - 1]);
                     const int head = idx / kHeadDim;
                     const int d = idx % kHeadDim;
                     const float *base =
@@ -1799,9 +2020,9 @@ void x_full_attn_decode_impl(
         // shards. A 256-thread work-group keeps one thread per output
         // dimension; its first eight subgroups compute independent online
         // softmax shards and a single barriered reduction merges them.
-        if (pos >= 64) {
+        if (branch == TQ_ATTN_BRANCH_SIMD16_SHARDED) {
             g_attn_branch_counts[TQ_ATTN_BRANCH_SIMD16_SHARDED].fetch_add(
-                1, std::memory_order_relaxed);
+                n, std::memory_order_relaxed);
             constexpr int kTokenShards = 16;
             constexpr int kWorkgroup = kHeadDim;
             tq_q().submit([&](sycl::handler &cgh) {
@@ -1810,11 +2031,21 @@ void x_full_attn_decode_impl(
                 sycl::local_accessor<float, 1> shard_out(
                     kTokenShards * kHeadDim, cgh);
                 cgh.parallel_for(
-                    sycl::nd_range<1>(static_cast<size_t>(nh) * kWorkgroup,
+                    tq_attn_decode_grid<Rows>(n, static_cast<size_t>(nh) * kWorkgroup,
                                       kWorkgroup),
-                    [=](sycl::nd_item<1> item)
+                    [=](sycl::nd_item<kGridDim> item)
                         [[sycl::reqd_sub_group_size(kSubgroup)]] {
-                        const int head = static_cast<int>(item.get_group_linear_id());
+                        const size_t batch_row = tq_attn_decode_row(item);
+                        const auto &request = batch.rows[batch_row];
+                        float *d_out = request.out;
+                        const float *d_qg_proj = request.qg;
+                        uint8_t *d_k_cache = request.kc;
+                        uint8_t *d_v_cache = request.vc;
+                        uint16_t *d_k_scale = request.ks;
+                        uint16_t *d_v_scale = request.vs;
+                        const int pos = request.pos;
+                        const tq_kv_layout_t layout = request.layout;
+                        const int head = static_cast<int>(item.get_group(kGridDim - 1));
                         const int local = static_cast<int>(item.get_local_linear_id());
                         const sycl::sub_group sg = item.get_sub_group();
                         const int shard = static_cast<int>(sg.get_group_linear_id());
@@ -1934,12 +2165,22 @@ void x_full_attn_decode_impl(
         }
 
         g_attn_branch_counts[TQ_ATTN_BRANCH_SIMD16_SHORT].fetch_add(
-            1, std::memory_order_relaxed);
+            n, std::memory_order_relaxed);
         tq_q().parallel_for(
-            sycl::nd_range<1>(static_cast<size_t>(nh) * kSubgroup, kSubgroup),
-            [=](sycl::nd_item<1> item)
+            tq_attn_decode_grid<Rows>(n, static_cast<size_t>(nh) * kSubgroup, kSubgroup),
+            [=](sycl::nd_item<kGridDim> item)
                 [[sycl::reqd_sub_group_size(kSubgroup)]] {
-                const int head = static_cast<int>(item.get_group_linear_id());
+                const size_t batch_row = tq_attn_decode_row(item);
+                const auto &request = batch.rows[batch_row];
+                float *d_out = request.out;
+                const float *d_qg_proj = request.qg;
+                uint8_t *d_k_cache = request.kc;
+                uint8_t *d_v_cache = request.vc;
+                uint16_t *d_k_scale = request.ks;
+                uint16_t *d_v_scale = request.vs;
+                const int pos = request.pos;
+                const tq_kv_layout_t layout = request.layout;
+                const int head = static_cast<int>(item.get_group(kGridDim - 1));
                 const sycl::sub_group sg = item.get_sub_group();
                 const int lane = static_cast<int>(sg.get_local_linear_id());
                 const int kv_head = head / (nh / nkv);
@@ -2019,15 +2260,25 @@ void x_full_attn_decode_impl(
     }
 
     g_attn_branch_counts[TQ_ATTN_BRANCH_GENERIC].fetch_add(
-        1, std::memory_order_relaxed);
+        n, std::memory_order_relaxed);
 
     // First write one K/V row per KV head. CUDA lines 12228-12231 perform the
     // same writes redundantly from every grouped q-head block; splitting this
     // phase avoids a SYCL global-memory data race while preserving the values.
     tq_q().parallel_for(
-        sycl::nd_range<1>(static_cast<size_t>(nkv) * local_size, local_size),
-        [=](sycl::nd_item<1> item) {
-            const int kv_head = static_cast<int>(item.get_group_linear_id());
+        tq_attn_decode_grid<Rows>(n, static_cast<size_t>(nkv) * local_size, local_size),
+        [=](sycl::nd_item<kGridDim> item) {
+            const size_t batch_row = tq_attn_decode_row(item);
+            const auto &request = batch.rows[batch_row];
+            const float *d_k_proj = request.k;
+            const float *d_v_proj = request.v;
+            uint8_t *d_k_cache = request.kc;
+            uint8_t *d_v_cache = request.vc;
+            uint16_t *d_k_scale = request.ks;
+            uint16_t *d_v_scale = request.vs;
+            const int pos = request.pos;
+            const tq_kv_layout_t layout = request.layout;
+            const int kv_head = static_cast<int>(item.get_group(kGridDim - 1));
             const int tid = static_cast<int>(item.get_local_linear_id());
             const float raw_k = d_k_proj[static_cast<size_t>(kv_head) * hd + tid];
 
@@ -2090,9 +2341,19 @@ void x_full_attn_decode_impl(
         sycl::local_accessor<float, 1> softmax_shared(sycl::range<1>(3), cgh);
 
         cgh.parallel_for(
-            sycl::nd_range<1>(static_cast<size_t>(nh) * local_size, local_size),
-            [=](sycl::nd_item<1> item) {
-                const int head = static_cast<int>(item.get_group_linear_id());
+            tq_attn_decode_grid<Rows>(n, static_cast<size_t>(nh) * local_size, local_size),
+            [=](sycl::nd_item<kGridDim> item) {
+                const size_t batch_row = tq_attn_decode_row(item);
+                const auto &request = batch.rows[batch_row];
+                float *d_out = request.out;
+                const float *d_qg_proj = request.qg;
+                uint8_t *d_k_cache = request.kc;
+                uint8_t *d_v_cache = request.vc;
+                uint16_t *d_k_scale = request.ks;
+                uint16_t *d_v_scale = request.vs;
+                const int pos = request.pos;
+                const tq_kv_layout_t layout = request.layout;
+                const int head = static_cast<int>(item.get_group(kGridDim - 1));
                 const int tid = static_cast<int>(item.get_local_linear_id());
 
                 // CUDA lines 12143-12147: GQA maps contiguous groups of q heads
@@ -2188,15 +2449,87 @@ void x_full_attn_decode(
     uint16_t *d_k_scale, uint16_t *d_v_scale, float *d_scores, int pos,
     int nh, int nkv, int hd, float eps, float rope_theta,
     float partial_rotary_factor, int sstride, tq_kv_layout_t layout) {
+    const tq_attn_decode_rows_t<1> batch{{{
+        d_out, d_qg_proj, d_k_proj, d_v_proj, d_k_cache, d_v_cache,
+        d_k_scale, d_v_scale, d_scores, pos, layout}}};
+    const auto branch = tq_attn_decode_branch(pos, nh, nkv, hd);
     if (layout.block_table) {
         x_full_attn_decode_impl<true>(
-            d_out, d_qg_proj, d_k_proj, d_v_proj, d_q_norm, d_k_norm,
-            d_k_cache, d_v_cache, d_k_scale, d_v_scale, d_scores, pos, nh,
-            nkv, hd, eps, rope_theta, partial_rotary_factor, sstride, layout);
+            batch, 1, d_q_norm, d_k_norm, nh, nkv, hd, eps, rope_theta,
+            partial_rotary_factor, sstride, branch);
     } else {
         x_full_attn_decode_impl<false>(
-            d_out, d_qg_proj, d_k_proj, d_v_proj, d_q_norm, d_k_norm,
-            d_k_cache, d_v_cache, d_k_scale, d_v_scale, d_scores, pos, nh,
-            nkv, hd, eps, rope_theta, partial_rotary_factor, sstride, layout);
+            batch, 1, d_q_norm, d_k_norm, nh, nkv, hd, eps, rope_theta,
+            partial_rotary_factor, sstride, branch);
+    }
+}
+
+void x_full_attn_decode_batch(
+    const tq_decode_attn_request_t *requests, int n,
+    const uint16_t *qnorm, const uint16_t *knorm,
+    int nh, int nkv, int hd, float eps, float theta,
+    float partial_rotary_factor, int sstride) {
+    if (!requests || n < 1 || n > 8) return;
+    if (n == 1) {
+        const auto &r = requests[0];
+        x_full_attn_decode(r.out, r.qg, r.k, r.v, qnorm, knorm,
+                           r.kc, r.vc, r.ks, r.vs, r.scores, r.pos,
+                           nh, nkv, hd, eps, theta, partial_rotary_factor,
+                           sstride, r.layout);
+        return;
+    }
+
+    tq_attn_branch_t branches[8];
+    size_t partial_row_elements = 0;
+    size_t qfrag_row_dwords = 0;
+    for (int i = 0; i < n; ++i) {
+        const auto &r = requests[i];
+        // Batched paged kernels share the supported power-of-two contract;
+        // each row still carries its own page size and block-table pointer.
+        if (r.layout.block_table &&
+            !((r.layout.page_log == 7 && r.layout.page_mask == 127) ||
+              (r.layout.page_log == 8 && r.layout.page_mask == 255)))
+            return;
+        branches[i] = tq_attn_decode_branch(r.pos, nh, nkv, hd);
+        int segments = 0;
+        if (branches[i] == TQ_ATTN_BRANCH_SIMD16_DPAS) {
+            // Every eligible position is >=512, hence the original nseg=32.
+            segments = 32;
+            qfrag_row_dwords = static_cast<size_t>(nkv) * 16 * 64;
+        } else if (branches[i] == TQ_ATTN_BRANCH_SIMD16_GROUPED) {
+            segments = TQ_ATTN_G >= 6 ? 6 : 3;
+        }
+        const size_t elements = static_cast<size_t>(nh) * segments * (hd + 2);
+        if (elements > partial_row_elements) partial_row_elements = elements;
+    }
+    // Grow once before any bucket is queued. Each bucket has disjoint row
+    // slices; later buckets may reuse them only on the existing in-order queue.
+    // No descriptor upload or caller-owned host memory survives submission.
+    ensure_attn_partials(static_cast<size_t>(n) * partial_row_elements);
+    ensure_attn_qfrag(static_cast<size_t>(n) * qfrag_row_dwords);
+
+    bool submitted[8] = {};
+    for (int first = 0; first < n; ++first) {
+        if (submitted[first]) continue;
+        const auto branch = branches[first];
+        const bool paged = requests[first].layout.block_table != nullptr;
+        tq_attn_decode_rows_t<8> batch{};
+        int count = 0;
+        for (int i = first; i < n; ++i) {
+            if (!submitted[i] && branches[i] == branch &&
+                (requests[i].layout.block_table != nullptr) == paged) {
+                batch.rows[count++] = requests[i];
+                submitted[i] = true;
+            }
+        }
+        if (paged) {
+            x_full_attn_decode_impl<true>(
+                batch, count, qnorm, knorm, nh, nkv, hd, eps, theta,
+                partial_rotary_factor, sstride, branch);
+        } else {
+            x_full_attn_decode_impl<false>(
+                batch, count, qnorm, knorm, nh, nkv, hd, eps, theta,
+                partial_rotary_factor, sstride, branch);
+        }
     }
 }

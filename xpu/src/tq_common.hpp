@@ -29,6 +29,7 @@
 #define TQ_DTYPE_FP16 1
 #define TQ_DTYPE_BF16 2
 #define TQ_ARGMAX_BLOCKS 1024
+#define TQ_ARGMAX_MAX_ROWS 8
 #define TQ_PAGED_ERR_CAPACITY (-1001)
 
 #define TQ_FLAG_FP8_QMMA_WEIGHTS (1u << 0)
@@ -236,6 +237,13 @@ void x_add_inplace(float *d_x, const float *d_y, int N);
 // two-stage argmax over logits[V] -> (id, logit) on host
 void x_argmax(const float *d_logits, int V, float *d_vals, int *d_ids,
               int *out_id, float *out_logit);
+// Row-major logits[rows][V], rows in [1,TQ_ARGMAX_MAX_ROWS]. Each scratch
+// array has rows*(TQ_ARGMAX_BLOCKS+1) entries: row-major partial winners,
+// then rows contiguous final winners. Host outputs have rows entries and
+// are ready on return. Invalid row counts/null outputs leave outputs alone;
+// valid rows with invalid device pointers/V return (0,-FLT_MAX) per row.
+void x_argmax_batch(const float *d_logits, int V, int rows,
+                    float *d_vals, int *d_ids, int *out_ids, float *out_logits);
 
 // ---------------------------------------------------------------------------
 // kernels_seq.cpp — conv1d, DeltaNet core, full-attention decode (fp32 KV)
@@ -245,6 +253,29 @@ void x_argmax(const float *d_logits, int V, float *d_vals, int *d_ids,
 // k_tq_linear_conv_update semantics for a single token.
 void x_linear_conv_update(float *d_out, float *d_state, const float *d_x,
                           const uint16_t *d_conv_w, int conv_dim, int ks);
+
+constexpr int TQ_LINEAR_DECODE_MAX_ROWS = 8;
+// Independent device buffers; conv_in may equal conv_out within one row.
+// Rows are host descriptors copied into a bounded kernel capture. Persistent
+// states and outputs of different rows must not overlap.
+struct tq_linear_decode_row {
+    float *conv_out;
+    float *conv_state;
+    const float *conv_in;
+    float *core_out;
+    float *recurrent;
+    const float *z;
+    const float *b;
+    const float *a;
+};
+int x_linear_conv_update_batch(const tq_linear_decode_row *rows, int n,
+                               const uint16_t *d_conv_w, int conv_dim, int ks);
+int x_linear_decode_core_gated_batch(const tq_linear_decode_row *rows, int n,
+                                     const float *d_A_log,
+                                     const uint16_t *d_dt_bias,
+                                     const float *d_norm_w,
+                                     int nk, int dk, int nv, int dv, float eps);
+
 // Chunk-parallel GDN prefill (level-up design 9.2, ported from the CUDA
 // twin's k_tq_deltanet_chunk). x_linear_conv_chunk applies the causal
 // depthwise conv + SiLU to T tokens in parallel (d_out != d_x; the incoming
@@ -255,11 +286,14 @@ void x_linear_conv_update(float *d_out, float *d_state, const float *d_x,
 // state as T serial x_linear_decode_core_gated calls, up to reassociation.
 void x_linear_conv_chunk(float *d_out, float *d_state, const float *d_x,
                          const uint16_t *d_conv_w, int conv_dim, int ks, int T);
+// d_qk_factors is nonaliasing scratch with capacity measured in floats;
+// at least 2*T*nk floats are required for the shared per-token Q/K factors.
 int x_deltanet_chunk(float *d_core_out, float *d_recurrent,
                      const float *d_conv_out, const float *d_z,
                      const float *d_b, const float *d_a, const float *d_A_log,
                      const uint16_t *d_dt_bias, const float *d_norm_w, int T,
-                     int nk, int dk, int nv, int dv, float eps);
+                     int nk, int dk, int nv, int dv, float eps,
+                     float *d_qk_factors, size_t qk_factor_capacity);
 void x_linear_conv_advance(float *d_state, const float *d_x, int conv_dim,
                            int ks, int T);
 // Batched W8A8 GEMM (RC8 s8 x s8 at K=32): same task grid/staging as
@@ -295,6 +329,22 @@ void x_full_attn_decode(float *d_out, const float *d_qg_proj, const float *d_k_p
                         float *d_scores, int pos, int nh, int nkv, int hd,
                         float eps, float rope_theta, float partial_rotary_factor,
                         int sstride, tq_kv_layout_t layout);
+// Host-only decode rows, copied by value before submission. Each row owns
+// independent cache addressing and scratch; descriptor storage may be reused.
+struct tq_decode_attn_request_t {
+    float *out;
+    const float *qg, *k, *v;
+    uint8_t *kc, *vc;
+    uint16_t *ks, *vs;
+    float *scores;
+    int pos;
+    tq_kv_layout_t layout;
+};
+void x_full_attn_decode_batch(const tq_decode_attn_request_t *requests, int n,
+                              const uint16_t *qnorm, const uint16_t *knorm,
+                              int nh, int nkv, int hd, float eps, float theta,
+                              float partial_rotary_factor, int sstride);
+
 // Wide prefill, two phases in order on the in-order queue. Phase 1 stores every
 // chunk token's normed+RoPE'd K and raw V (byte-identical to the store inside
 // x_full_attn_decode), so a token can attend causally to earlier tokens of its

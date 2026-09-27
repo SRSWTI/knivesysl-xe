@@ -949,6 +949,11 @@ class Engine(threading.Thread):
                 self._finish(g, "cancelled")
             elif g.pos == deepest:
                 self._store(g.ids, g.pos, g.slot)
+            # Use only this wave's remaining prompt-row budget; the existing
+            # decode step can produce the first token without another iteration.
+            if (g.state == PREFILL and len(g.ids) - g.pos == 1 and
+                    rows + len(self.prefill_tails) < budget):
+                self.prefill_tails.append(g)
 
     def _complete_decode_row(self, g, token, width):
         if token < 0:
